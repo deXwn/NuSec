@@ -538,6 +538,75 @@ def bdc [pattern: string] {
     echo $pattern | base64 -d
 }
 
+# Normalize parsed JSON output to a list of records
+def normalize-json-rows [parsed_value: any] {
+    let parsed_desc = ($parsed_value | describe)
+    if ($parsed_desc | str starts-with "record") {
+        [$parsed_value]
+    } else if (($parsed_desc | str starts-with "list") or ($parsed_desc | str starts-with "table")) {
+        $parsed_value
+    } else {
+        []
+    }
+}
+
+# Execute PowerShell and always return decoded text output
+def powershell-text [command_text: string] {
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | where type == "external" | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
+    # Force UTF-8 output from PowerShell to avoid mojibake on Turkish locales.
+    let prelude = "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)"
+    let full_command = $"($prelude); ($command_text)"
+
+    let raw = if (do $has_cmd "pwsh") {
+        (pwsh -NoProfile -NonInteractive -Command $full_command)
+    } else {
+        (powershell -NoProfile -NonInteractive -Command $full_command)
+    }
+    let raw_desc = ($raw | describe)
+
+    if ($raw_desc | str starts-with "binary") {
+        let utf8_decoded = (try {
+            $raw | decode utf-8
+        } catch {
+            (try {
+                $raw | decode utf-16
+            } catch {
+                (try {
+                    $raw | decode cp1254
+                } catch {
+                    ""
+                })
+            })
+        })
+
+        if ($utf8_decoded | str contains "�") {
+            (try {
+                $raw | decode cp1254
+            } catch {
+                $utf8_decoded
+            })
+        } else {
+            $utf8_decoded
+        }
+    } else if (($raw_desc | str starts-with "list") or ($raw_desc | str starts-with "table")) {
+        ($raw | each { |line| $line | into string } | str join "\n")
+    } else {
+        (try {
+            $raw | into string
+        } catch {
+            ""
+        })
+    }
+}
+
 # Hunt suspicious Windows events quickly
 def windows-evt-hunt [
     --log: string = "Security"  # Security | System | Application
@@ -576,21 +645,14 @@ def windows-evt-hunt [
         $ps_lines ++= [("$events = $events | Where-Object { $_.Message -like '*" + $safe_contains + "*' }")]
     }
 
-    $ps_lines ++= [("$events | Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, MachineName, Message | Sort-Object TimeCreated -Descending | Select-Object -First " + ($limit | into string) + " | ConvertTo-Json -Depth 4")]
+    $ps_lines ++= [("$events | Sort-Object TimeCreated -Descending | Select-Object -First " + ($limit | into string) + " @{Name='TimeCreated';Expression={ if ($_.TimeCreated) { $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss') } else { '' } }}, Id, LevelDisplayName, ProviderName, MachineName, Message | ConvertTo-Json -Depth 4")]
 
-    let raw = (powershell -NoProfile -Command ($ps_lines | str join "; "))
+    let raw = (powershell-text ($ps_lines | str join "; "))
     if (($raw | str trim) == "") {
         []
     } else {
         let parsed = (try { $raw | from json } catch { [] })
-        let parsed_desc = ($parsed | describe)
-        if ($parsed_desc | str starts-with "record") {
-            [$parsed]
-        } else if ($parsed_desc | str starts-with "list") {
-            $parsed
-        } else {
-            []
-        }
+        normalize-json-rows $parsed
     }
 }
 
@@ -625,7 +687,7 @@ def persist-hunt [
         }
 
         $ps_lines ++= [("$items | Select-Object -First " + ($limit | into string) + " | ConvertTo-Json -Depth 4")]
-        let raw = (powershell -NoProfile -Command ($ps_lines | str join "; "))
+        let raw = (powershell-text ($ps_lines | str join "; "))
         if (($raw | str trim) == "") {
             []
         } else {
@@ -731,16 +793,9 @@ def proc-hunt [
     let needle = if $contains != null { ($contains | str downcase | str trim) } else { null }
 
     let process_rows = if $is_windows {
-        let raw = (powershell -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine | ConvertTo-Json -Depth 4")
+        let raw = (powershell-text "Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine | ConvertTo-Json -Depth 4")
         let parsed = (try { $raw | from json } catch { [] })
-        let parsed_desc = ($parsed | describe)
-        let rows = if ($parsed_desc | str starts-with "record") {
-            [$parsed]
-        } else if ($parsed_desc | str starts-with "list") {
-            $parsed
-        } else {
-            []
-        }
+        let rows = (normalize-json-rows $parsed)
 
         $rows | each { |p|
             {
@@ -830,6 +885,11 @@ def log-hunt [
     let is_windows = (($nu.os-info.name | str downcase) == "windows")
     let default_pattern = "failed password|authentication failure|invalid user|sudo:|powershell|cmd.exe|wget|curl|base64|rundll32|mshta|certutil"
     let needle = if $pattern != null { ($pattern | str trim | str downcase) } else { null }
+    let auth_failure_hint = if $needle == null {
+        true
+    } else {
+        $needle =~ "(failed password|authentication failure|invalid user|logon fail|login fail|oturum a[cç]ama|hesap oturum a[cç]amad[ıi])"
+    }
 
     if $is_windows {
         let safe_pattern = if $pattern != null {
@@ -838,30 +898,31 @@ def log-hunt [
             $default_pattern
         }
 
-        let ps = [
+        mut ps = [
             "$ErrorActionPreference = 'SilentlyContinue'"
             ("$start = (Get-Date).AddHours(-" + ($since_hours | into string) + ")")
             "$events = Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime=$start} -ErrorAction SilentlyContinue"
             "$events += Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$start} -ErrorAction SilentlyContinue"
             "$events += Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$start} -ErrorAction SilentlyContinue"
-            ("$events = $events | Where-Object { $_.Message -match '(?i)" + $safe_pattern + "' }")
-            "$events | Sort-Object TimeCreated -Descending | Select-Object -First 9999 TimeCreated, Id, LogName, ProviderName, Message"
+        ]
+
+        if $auth_failure_hint {
+            $ps ++= [("$events = $events | Where-Object { ($_.Id -eq 4625) -or ($_.Message -match '(?i)" + $safe_pattern + "') }")]
+        } else {
+            $ps ++= [("$events = $events | Where-Object { $_.Message -match '(?i)" + $safe_pattern + "' }")]
+        }
+
+        $ps ++= [
+            "$events = $events | Sort-Object TimeCreated -Descending | Select-Object @{Name='TimeCreated';Expression={ if ($_.TimeCreated) { $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss') } else { '' } }}, Id, LogName, ProviderName, Message"
             ("$events | Select-Object -First " + ($limit | into string) + " | ConvertTo-Json -Depth 4")
         ]
 
-        let raw = (powershell -NoProfile -Command ($ps | str join "; "))
+        let raw = (powershell-text ($ps | str join "; "))
         if (($raw | str trim) == "") {
             []
         } else {
             let parsed = (try { $raw | from json } catch { [] })
-            let parsed_desc = ($parsed | describe)
-            if ($parsed_desc | str starts-with "record") {
-                [$parsed]
-            } else if ($parsed_desc | str starts-with "list") {
-                $parsed
-            } else {
-                []
-            }
+            normalize-json-rows $parsed
         }
     } else {
         let has_journalctl = (try {
