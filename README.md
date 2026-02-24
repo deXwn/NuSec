@@ -6,10 +6,13 @@ Nushell config and helper commands for security research workflows.
 
 ## Requirements
 - `nu` (Nushell)
-- Common Linux CLI tools (`python`, `git`, `curl`/network access)
+- Common CLI tools (`python`, `git`, `curl`/network access)
 - Optional: `go` for auto-installing some tools (`httpx`, `hednsextractor`)
+- Optional: `yara` for local rule scanning with `yrs`
 - Optional on Linux: `apt` + `sudo` for package helper commands
+- Optional on Linux: `journalctl` for richer `log-hunt` output
 - Optional on Windows: `winget` for package helper commands
+- Optional on Windows: `powershell` for `windows-evt-hunt` / `log-hunt` / `persist-hunt`
 
 ## Setup
 Run this in Nushell (Linux/macOS/Windows):
@@ -32,7 +35,9 @@ $env.NUSECURITY_SHOW_SYSINFO = true
 
 ## Quick Examples
 ```nu
-hlp -v                      # list custom commands with parameter details
+hlp                         # compact command list with summary + sample
+hlp -v                      # verbose command list
+hlp triage                  # show detailed usage/examples for one command
 chkbgp 8.8.8.8              # BGP information for IP
 haus                        # URLHaus online feed (default)
 haus normal --limit 20      # full feed, first 20 URLs
@@ -49,6 +54,11 @@ triage --query "sha256:..." --limit 1 | get 0.MalwareConfig  # expand parsed con
 hx subdomains.txt           # httpx scan over a file
 shx example.com             # subfinder + httpx
 yrs suspicious.bin          # YARA scan using ~/rules
+persist-hunt --contains cron --limit 50 # Linux/Windows persistence artifacts
+proc-hunt --min-score 2 --limit 50      # heuristic suspicious process scoring
+log-hunt "failed password" --since-hours 24 --limit 100 # suspicious log lines
+timeline-lite /var/tmp --with-hash --limit 100 # quick file timeline + optional SHA256
+windows-evt-hunt --log Security --event-id 4625 --since-hours 24 # Windows event triage
 ```
 
 `triage` C2 output is heuristic and focuses on likely payload/C2 hosts from behavioral requests.
@@ -56,6 +66,11 @@ When available, domains are shown together with IP as `domain [ip]`.
 `MalwareConfig` is now a structured record (`family/version/botnet/c2/urls/credentials/mutex`) for cleaner table output.
 `haus` supports `--limit`, `--host-only`, `--contains`, `--host-contains`, `--host-ends-with`, `--https-only`, and `--raw`.
 `rware` supports `--monitor`, `--interval`, `--limit`, and `--max-cycles` (test/debug loop count).
+`windows-evt-hunt` is Windows-only and uses PowerShell `Get-WinEvent`.
+`persist-hunt` checks common persistence points (Linux cron/systemd/autostart/shell init, Windows Run keys/startup/scheduled tasks).
+`proc-hunt` is heuristic scoring and may include false positives; tune with `--min-score` and `--contains`.
+`log-hunt` reads Linux log files + `journalctl` (if available) or Windows Event Logs.
+`timeline-lite` supports `--with-hash` for SHA256 at extra runtime cost.
 
 ## Safety Notes
 - `fixu` formats a disk. Double-check target device before running.
@@ -68,4 +83,3 @@ After setup, you can pull the latest upstream config from inside Nu:
 ```nu
 upc
 ```
-
