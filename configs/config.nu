@@ -325,52 +325,206 @@ def pdsc [tool_name: string] {
     go install -v github.com/projectdiscovery/($tool_name)/cmd/($tool_name)@latest
 }
 
-# Get user defined commands/aliases
-def hlp [--verbose (-v)] {
-    let commands = (help commands | where command_type =~ "custom")
-    if ($verbose == false) {
-        return ($commands | select name description)
+# Get project commands with compact usage/samples
+def hlp [command?: string, --verbose (-v)] {
+    let summaries = {
+        chkbgp: "Fetch ASN/BGP details for an IP."
+        hs: "Start a quick HTTP file server."
+        catt: "Show a file with syntax highlighting."
+        ifc: "List network interfaces."
+        sd: "List disks."
+        lsv: "Sort files by size."
+        lsl: "Sort files by modified time."
+        dosh: "Run bash inside a Docker image."
+        drmi: "Force remove a Docker image."
+        aget: "Install a package via APT."
+        arem: "Remove a package via APT."
+        netcon: "List IPv4 connections and listening ports."
+        vrb: "Fetch latest 50 panel entries from Viriback."
+        haus: "Fetch and filter URLHaus feed entries."
+        tfox: "Fetch recent URL IoCs from ThreatFox."
+        hx: "Scan a target list with httpx."
+        pdsc: "Install a ProjectDiscovery tool with Go."
+        hlp: "Show commands and usage examples."
+        shx: "Run subfinder + httpx domain scan."
+        bdc: "Decode Base64 text."
+        hdns: "Hunt candidate C2 domains with hednsextractor."
+        "windows-evt-hunt": "Hunt Windows Event Log entries quickly."
+        "persist-hunt": "Hunt persistence artifacts on host."
+        "proc-hunt": "Score suspicious running processes."
+        "log-hunt": "Hunt suspicious auth/system log lines."
+        "timeline-lite": "Build quick file timeline for a path."
+        upc: "Pull latest config from GitHub."
+        clean: "Run APT and cache cleanup."
+        arpt: "Parse and list ARP table entries."
+        ff: "Search files by name system-wide."
+        serv: "Show service active/inactive status."
+        dls: "List disk partitions via lsblk."
+        fixu: "Format disk with wipefs + vfat."
+        yrs: "Scan a file with YARA rules."
+        rware: "List/monitor ransomware victim feed."
+        pls: "Fetch proxy list with geo/ISP info."
+        crt: "Enumerate subdomains via crt.sh."
+        rip: "Run reverse IP lookup."
+        dchr: "Query DNS history (A records)."
+        gf: "Extract href file names from open directory."
+        triage: "Fetch tria.ge reports and C2/config summary."
     }
 
+    let samples = {
+        chkbgp: "chkbgp 8.8.8.8"
+        hs: "hs --path /tmp/share"
+        catt: "catt configs/config.nu"
+        ifc: "ifc"
+        sd: "sd"
+        lsv: "lsv"
+        lsl: "lsl"
+        dosh: "dosh ubuntu:24.04"
+        drmi: "drmi <image_id>"
+        aget: "aget nmap"
+        arem: "arem nmap"
+        netcon: "netcon"
+        vrb: "vrb"
+        haus: "haus normal --limit 20"
+        tfox: "tfox --dtype url"
+        hx: "hx subdomains.txt"
+        pdsc: "pdsc nuclei"
+        hlp: "hlp -v"
+        shx: "shx example.com"
+        bdc: "bdc SGVsbG8="
+        hdns: "hdns suspicious-domain.com"
+        "windows-evt-hunt": "windows-evt-hunt --log Security --event-id 4625 --since-hours 24"
+        "persist-hunt": "persist-hunt --contains cron --limit 50"
+        "proc-hunt": "proc-hunt --min-score 2 --limit 50"
+        "log-hunt": "log-hunt \"failed password\" --since-hours 24 --limit 100"
+        "timeline-lite": "timeline-lite /var/tmp --with-hash --limit 100"
+        upc: "upc"
+        clean: "clean"
+        arpt: "arpt"
+        ff: "ff sshd_config"
+        serv: "serv"
+        dls: "dls"
+        fixu: "fixu /dev/sdb1"
+        yrs: "yrs suspicious.bin"
+        rware: "rware tr --limit 20"
+        pls: "pls"
+        crt: "crt example.com"
+        rip: "rip 1.1.1.1"
+        dchr: "dchr example.com"
+        gf: "gf https://example.com/open/"
+        triage: "triage --family remcos --limit 3"
+    }
+
+    let examples = {
+        haus: [
+            "haus normal --limit 20"
+            "haus --host-only --contains \"in.net\" --limit 10"
+            "haus --host-ends-with \".tr\" --host-only --limit 20"
+        ]
+        tfox: [
+            "tfox --dtype url"
+            "tfox --dtype all"
+        ]
+        triage: [
+            "triage --family agenttesla --limit 5"
+            "triage --family remcos --limit 3"
+            "triage --query \"sha1:...\" --limit 3 --no-c2 --no-config"
+            "triage --query \"sha256:...\" --limit 1 | get 0.MalwareConfig"
+        ]
+        rware: [
+            "rware tr --limit 20"
+            "rware --limit 20"
+            "rware tr --monitor --interval 30 --max-cycles 20"
+        ]
+    }
+
+    let tracked_names = ($samples | columns)
     let format_usage_part = { |param: record|
         let is_option = ($param.name | str starts-with "--")
         if $is_option {
             if $param.type == "switch" {
                 if $param.required { $param.name } else { $"[($param.name)]" }
             } else {
-                if $param.required {
-                    $"($param.name) <($param.type)>"
-                } else {
-                    $"[($param.name) <($param.type)>]"
-                }
+                if $param.required { $"($param.name) <($param.type)>" } else { $"[($param.name) <($param.type)>]" }
             }
         } else {
-            if $param.required {
-                $"<($param.name):($param.type)>"
+            if $param.required { $"<($param.name):($param.type)>" } else { $"[($param.name):($param.type)]" }
+        }
+    }
+
+    let commands = (help commands
+        | where command_type =~ "custom"
+        | where { |cmd| ($tracked_names | any { |n| $n == $cmd.name }) }
+        | each { |cmd|
+            let command_params = ($cmd.params | where { |p| ($p.name | str starts-with "--help") == false })
+            let usage_parts = ($command_params | each { |p| do $format_usage_part $p })
+            let usage_text = (([$cmd.name] | append $usage_parts) | str join " ")
+            let params_detail = (if (($command_params | length) == 0) {
+                "-"
             } else {
-                $"[($param.name):($param.type)]"
+                $command_params
+                | each { |p| if $p.required { $"($p.name)*" } else { $p.name } }
+                | str join ", "
+            })
+            let summary_text = (try {
+                $summaries | get $cmd.name
+            } catch {
+                let raw_desc = ($cmd.description | str trim)
+                if (($raw_desc | str length) > 60) {
+                    $"(($raw_desc | str substring 0..57))..."
+                } else {
+                    $raw_desc
+                }
+            })
+            let sample_text = (try { $samples | get $cmd.name } catch { "-" })
+            $cmd | merge { usage: $usage_text, params_detail: $params_detail, sample: $sample_text, summary: $summary_text }
+        }
+        | sort-by name)
+
+    if $command != null {
+        let selected = ($commands | where { |c| $c.name == $command })
+        if (($selected | length) == 0) {
+            error make { msg: $"Unknown command: ($command). Use 'hlp' to list available project commands." }
+        }
+        let cmd = ($selected | first)
+        let cmd_examples = (try { $examples | get $cmd.name } catch { [$cmd.sample] })
+        let cmd_params = ($cmd.params | where { |p| ($p.name | str starts-with "--help") == false } | select name type required description)
+        let example_lines = (if (($cmd_examples | length) == 0) {
+            "  - -"
+        } else {
+            $cmd_examples | each { |ex| $"  - ($ex)" } | str join "\n"
+        })
+        let param_lines = (if (($cmd_params | length) == 0) {
+            "  - -"
+        } else {
+            $cmd_params | each { |p|
+                let req = (if $p.required { "required" } else { "optional" })
+                $"  - ($p.name) <($p.type)> [($req)] :: ($p.description)"
+            } | str join "\n"
+        })
+
+        $"
+name: ($cmd.name)
+description: ($cmd.description)
+usage: ($cmd.usage)
+sample: ($cmd.sample)
+examples:
+($example_lines)
+params:
+($param_lines)"
+    } else if $verbose {
+        ($commands
+            | each { |cmd|
+                $"
+($cmd.name)
+  desc: ($cmd.description)
+  usage: ($cmd.usage)
+  sample: ($cmd.sample)
+  params: ($cmd.params_detail)"
             }
-        }
-    }
-
-    let format_param_detail = { |param: record|
-        let requirement = if $param.required { "required" } else { "optional" }
-        let desc = (if (($param.description | str trim) == "") { "-" } else { $param.description })
-        $"($param.name): type=($param.type), ($requirement), desc=($desc)"
-    }
-
-    $commands | each { |cmd|
-        let command_params = ($cmd.params | where { |p| ($p.name | str starts-with "--help") == false })
-        let usage_parts = ($command_params | each { |p| do $format_usage_part $p })
-        let param_details = ($command_params | each { |p| do $format_param_detail $p })
-        let io_info = (if (($cmd.input_output | length) == 0) { "-" } else { $cmd.input_output | to text | str trim })
-        {
-            name: $cmd.name
-            description: $cmd.description
-            usage: (([$cmd.name] | append $usage_parts) | str join " ")
-            params_detail: (if (($param_details | length) == 0) { "-" } else { $param_details | str join " | " })
-            io: $io_info
-        }
+            | str join "\n\n")
+    } else {
+        $commands | select name summary sample | rename name description sample
     }
 }
 
@@ -382,6 +536,443 @@ def shx [target_domain: string] {
 # Base64 decoder
 def bdc [pattern: string] {
     echo $pattern | base64 -d
+}
+
+# Hunt suspicious Windows events quickly
+def windows-evt-hunt [
+    --log: string = "Security"  # Security | System | Application
+    --event-id: int             # Optional exact EventID filter
+    --contains: string          # Optional case-insensitive keyword filter for Message
+    --since-hours: int = 24     # Search window in hours
+    --limit: int = 200          # Max returned rows
+] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    if ($is_windows == false) {
+        error make { msg: "windows-evt-hunt can only run on Windows." }
+    }
+
+    let safe_log = ($log | str trim)
+    if $safe_log == "" {
+        error make { msg: "--log cannot be empty." }
+    }
+
+    let safe_contains = if $contains != null {
+        ($contains | str replace --all "'" "''")
+    } else {
+        null
+    }
+
+    mut ps_lines = [
+        "$ErrorActionPreference = 'SilentlyContinue'"
+        ("$start = (Get-Date).AddHours(-" + ($since_hours | into string) + ")")
+        ("$events = Get-WinEvent -FilterHashtable @{LogName='" + $safe_log + "'; StartTime=$start}")
+    ]
+
+    if $event_id != null {
+        $ps_lines ++= [("$events = $events | Where-Object { $_.Id -eq " + ($event_id | into string) + " }")]
+    }
+
+    if $safe_contains != null {
+        $ps_lines ++= [("$events = $events | Where-Object { $_.Message -like '*" + $safe_contains + "*' }")]
+    }
+
+    $ps_lines ++= [("$events | Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, MachineName, Message | Sort-Object TimeCreated -Descending | Select-Object -First " + ($limit | into string) + " | ConvertTo-Json -Depth 4")]
+
+    let raw = (powershell -NoProfile -Command ($ps_lines | str join "; "))
+    if (($raw | str trim) == "") {
+        []
+    } else {
+        let parsed = (try { $raw | from json } catch { [] })
+        let parsed_desc = ($parsed | describe)
+        if ($parsed_desc | str starts-with "record") {
+            [$parsed]
+        } else if ($parsed_desc | str starts-with "list") {
+            $parsed
+        } else {
+            []
+        }
+    }
+}
+
+# Hunt persistence artifacts on Linux/Windows
+def persist-hunt [
+    --contains: string  # Optional case-insensitive keyword filter
+    --limit: int = 300  # Max returned rows
+] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let keyword = if $contains != null { ($contains | str downcase | str trim) } else { null }
+
+    if $is_windows {
+        let safe_keyword = if $keyword != null {
+            ($keyword | str replace --all "'" "''")
+        } else {
+            null
+        }
+
+        mut ps_lines = [
+            "$ErrorActionPreference = 'SilentlyContinue'"
+            "$items = @()"
+            "$runPaths = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run','HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run')"
+            "foreach ($p in $runPaths) { if (Test-Path $p) { $props = Get-ItemProperty -Path $p; foreach ($prop in $props.PSObject.Properties) { if ($prop.Name -notmatch '^PS') { $items += [PSCustomObject]@{ category='registry-run'; location=$p; name=$prop.Name; value=[string]$prop.Value } } } } }"
+            "$startupDirs = @(\"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\", \"$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\")"
+            "foreach ($d in $startupDirs) { if (Test-Path $d) { Get-ChildItem -Path $d -Force | ForEach-Object { $items += [PSCustomObject]@{ category='startup-folder'; location=$_.FullName; name=$_.Name; value=$_.FullName } } } }"
+            "$tasks = Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\\Microsoft\\*' } | Select-Object TaskName, TaskPath, State"
+            "foreach ($t in $tasks) { $items += [PSCustomObject]@{ category='scheduled-task'; location=$t.TaskPath; name=$t.TaskName; value=[string]$t.State } }"
+        ]
+
+        if $safe_keyword != null {
+            $ps_lines ++= [("$items = $items | Where-Object { (($_.location + ' ' + $_.name + ' ' + $_.value).ToLower()) -like '*" + $safe_keyword + "*' }")]
+        }
+
+        $ps_lines ++= [("$items | Select-Object -First " + ($limit | into string) + " | ConvertTo-Json -Depth 4")]
+        let raw = (powershell -NoProfile -Command ($ps_lines | str join "; "))
+        if (($raw | str trim) == "") {
+            []
+        } else {
+            let parsed = (try { $raw | from json } catch { [] })
+            let parsed_desc = ($parsed | describe)
+            if ($parsed_desc | str starts-with "record") {
+                [$parsed]
+            } else if ($parsed_desc | str starts-with "list") {
+                $parsed
+            } else {
+                []
+            }
+        }
+    } else {
+        let candidates = [
+            "/etc/crontab"
+            "/etc/cron.d/*"
+            "/etc/cron.daily/*"
+            "/etc/cron.hourly/*"
+            "/etc/cron.weekly/*"
+            "/etc/cron.monthly/*"
+            "/etc/systemd/system/*.service"
+            "/etc/systemd/system/*.timer"
+            "/lib/systemd/system/*.service"
+            $"($env.HOME)/.config/systemd/user/*.service"
+            $"($env.HOME)/.config/autostart/*.desktop"
+            "/etc/rc.local"
+            $"($env.HOME)/.bashrc"
+            $"($env.HOME)/.profile"
+            $"($env.HOME)/.zshrc"
+        ]
+
+        mut rows = []
+        for pattern in $candidates {
+            let matches = (try { glob $pattern } catch { [] })
+            for path_item in $matches {
+                if (($path_item | path exists) == false) {
+                    continue
+                }
+                if ((try { $path_item | path type } catch { "other" }) != "file") {
+                    continue
+                }
+
+                let path_text = ($path_item | into string)
+                let lc_path = ($path_text | str downcase)
+                let category = if ($lc_path | str contains "/cron") {
+                    "cron"
+                } else if ($lc_path | str contains "systemd") {
+                    "systemd"
+                } else if ($lc_path | str contains "autostart") {
+                    "autostart"
+                } else if ($lc_path | str ends-with "rc.local") {
+                    "rc-local"
+                } else if (($lc_path | str ends-with ".bashrc") or ($lc_path | str ends-with ".profile") or ($lc_path | str ends-with ".zshrc")) {
+                    "shell-init"
+                } else {
+                    "persistence-file"
+                }
+
+                let clue = (try {
+                    open $path_item
+                    | lines
+                    | each { |line| $line | str trim }
+                    | where { |line| $line != "" and (($line | str starts-with "#") == false) and (($line | str starts-with ";") == false) }
+                    | first
+                } catch {
+                    "-"
+                })
+
+                let matches_keyword = if $keyword == null {
+                    true
+                } else {
+                    (($path_text | str downcase | str contains $keyword) or ($clue | str downcase | str contains $keyword))
+                }
+
+                if $matches_keyword {
+                    let meta = (try { ls -a $path_item | first } catch { null })
+                    if $meta != null {
+                        $rows ++= [{
+                            category: $category
+                            path: $path_text
+                            modified: (try { $meta.modified } catch { null })
+                            size: (try { $meta.size } catch { 0 })
+                            clue: $clue
+                        }]
+                    }
+                }
+            }
+        }
+
+        let out = ($rows | sort-by modified -r)
+        if $limit > 0 { $out | first $limit } else { $out }
+    }
+}
+
+# Score suspicious running processes
+def proc-hunt [
+    --contains: string  # Optional case-insensitive keyword filter
+    --min-score: int = 1 # Minimum heuristic score to keep
+    --limit: int = 200   # Max returned rows
+] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let needle = if $contains != null { ($contains | str downcase | str trim) } else { null }
+
+    let process_rows = if $is_windows {
+        let raw = (powershell -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine | ConvertTo-Json -Depth 4")
+        let parsed = (try { $raw | from json } catch { [] })
+        let parsed_desc = ($parsed | describe)
+        let rows = if ($parsed_desc | str starts-with "record") {
+            [$parsed]
+        } else if ($parsed_desc | str starts-with "list") {
+            $parsed
+        } else {
+            []
+        }
+
+        $rows | each { |p|
+            {
+                pid: (try { $p.ProcessId | into int } catch { 0 })
+                ppid: (try { $p.ParentProcessId | into int } catch { 0 })
+                user: "-"
+                name: (try { $p.Name | into string } catch { "-" })
+                cmdline: (try { $p.CommandLine | into string } catch { "" })
+            }
+        }
+    } else {
+        let raw = (^ps -eo pid=,ppid=,user=,comm=,args=)
+        $raw
+        | lines
+        | parse --regex '^\s*(?<pid>\d+)\s+(?<ppid>\d+)\s+(?<user>\S+)\s+(?<name>\S+)\s*(?<cmdline>.*)$'
+        | each { |p|
+            {
+                pid: (try { $p.pid | into int } catch { 0 })
+                ppid: (try { $p.ppid | into int } catch { 0 })
+                user: (try { $p.user | into string } catch { "-" })
+                name: (try { $p.name | into string } catch { "-" })
+                cmdline: (try { $p.cmdline | into string } catch { "" })
+            }
+        }
+    }
+
+    let scored = ($process_rows | each { |proc|
+        let cmd = ($proc.cmdline | str downcase)
+        mut score = 0
+        mut reasons = []
+
+        if ($cmd =~ '(/tmp/|/dev/shm/)') {
+            $score = ($score + 2)
+            $reasons ++= ["temp-exec-path"]
+        }
+        if ($cmd =~ '(curl|wget).*(http|https)') {
+            $score = ($score + 2)
+            $reasons ++= ["download-behavior"]
+        }
+        if ($cmd =~ '(powershell.+-enc|encodedcommand|frombase64string|base64 -d)') {
+            $score = ($score + 3)
+            $reasons ++= ["encoded-payload"]
+        }
+        if ($cmd =~ '(certutil|mshta|rundll32|regsvr32)') {
+            $score = ($score + 2)
+            $reasons ++= ["lolbin-usage"]
+        }
+        if ($cmd =~ '(nc |ncat |socat |reverse shell|/dev/tcp/)') {
+            $score = ($score + 3)
+            $reasons ++= ["shell-tunneling"]
+        }
+        if (($proc.name | str downcase) =~ '(python|bash|sh|powershell|cmd|wscript|cscript)') and ($cmd =~ '(http://|https://)') {
+            $score = ($score + 1)
+            $reasons ++= ["script-with-url"]
+        }
+
+        let matches_needle = if $needle == null {
+            true
+        } else {
+            ((($proc.name | str downcase) | str contains $needle) or ($cmd | str contains $needle))
+        }
+
+        if ($score >= $min_score and $matches_needle) {
+            {
+                pid: $proc.pid
+                ppid: $proc.ppid
+                user: $proc.user
+                name: $proc.name
+                score: $score
+                reasons: ($reasons | str join ", ")
+                cmdline: $proc.cmdline
+            }
+        } else {
+            null
+        }
+    } | where { |item| $item != null } | sort-by score -r)
+
+    if $limit > 0 { $scored | first $limit } else { $scored }
+}
+
+# Hunt suspicious log lines quickly
+def log-hunt [
+    pattern?: string      # Optional keyword/regex-like text match (case-insensitive contains)
+    --since-hours: int = 24 # Journal/Event lookback in hours
+    --limit: int = 300      # Max returned rows
+] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let default_pattern = "failed password|authentication failure|invalid user|sudo:|powershell|cmd.exe|wget|curl|base64|rundll32|mshta|certutil"
+    let needle = if $pattern != null { ($pattern | str trim | str downcase) } else { null }
+
+    if $is_windows {
+        let safe_pattern = if $pattern != null {
+            ($pattern | str replace --all "'" "''")
+        } else {
+            $default_pattern
+        }
+
+        let ps = [
+            "$ErrorActionPreference = 'SilentlyContinue'"
+            ("$start = (Get-Date).AddHours(-" + ($since_hours | into string) + ")")
+            "$events = Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime=$start} -ErrorAction SilentlyContinue"
+            "$events += Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$start} -ErrorAction SilentlyContinue"
+            "$events += Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$start} -ErrorAction SilentlyContinue"
+            ("$events = $events | Where-Object { $_.Message -match '(?i)" + $safe_pattern + "' }")
+            "$events | Sort-Object TimeCreated -Descending | Select-Object -First 9999 TimeCreated, Id, LogName, ProviderName, Message"
+            ("$events | Select-Object -First " + ($limit | into string) + " | ConvertTo-Json -Depth 4")
+        ]
+
+        let raw = (powershell -NoProfile -Command ($ps | str join "; "))
+        if (($raw | str trim) == "") {
+            []
+        } else {
+            let parsed = (try { $raw | from json } catch { [] })
+            let parsed_desc = ($parsed | describe)
+            if ($parsed_desc | str starts-with "record") {
+                [$parsed]
+            } else if ($parsed_desc | str starts-with "list") {
+                $parsed
+            } else {
+                []
+            }
+        }
+    } else {
+        let has_journalctl = (try {
+            let cmd_paths = (which --all journalctl | where type == "external" | get path)
+            (($cmd_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+
+        let file_candidates = [
+            "/var/log/auth.log"
+            "/var/log/secure"
+            "/var/log/syslog"
+            "/var/log/messages"
+        ]
+
+        mut rows = []
+        for log_file in $file_candidates {
+            if (($log_file | path exists) == false) {
+                continue
+            }
+
+            let found = (try {
+                open $log_file
+                | lines
+                | enumerate
+                | where { |row|
+                    let line = ($row.item | str downcase)
+                    if $needle != null {
+                        $line | str contains $needle
+                    } else {
+                        $line =~ $default_pattern
+                    }
+                }
+                | each { |row|
+                    {
+                        source: $log_file
+                        line: ($row.index + 1)
+                        message: ($row.item | str trim)
+                    }
+                }
+            } catch {
+                []
+            })
+            $rows = ($rows | append $found)
+        }
+
+        if $has_journalctl {
+            let journal_lines = (try {
+                journalctl --since $"($since_hours) hours ago" --no-pager
+                | lines
+                | where { |line|
+                    let lc = ($line | str downcase)
+                    if $needle != null {
+                        $lc | str contains $needle
+                    } else {
+                        $lc =~ $default_pattern
+                    }
+                }
+                | each { |line| { source: "journalctl", line: "-", message: ($line | str trim) } }
+            } catch {
+                []
+            })
+            $rows = ($rows | append $journal_lines)
+        }
+
+        if $limit > 0 { $rows | first $limit } else { $rows }
+    }
+}
+
+# Build a quick file timeline for a directory
+def timeline-lite [
+    target_path?: string = "."  # Directory to timeline
+    --contains: string          # Optional path keyword filter
+    --limit: int = 300          # Max returned rows
+    --with-hash                 # Include SHA256 (slower)
+] {
+    if (($target_path | path exists) == false) {
+        error make { msg: $"Path not found: ($target_path)" }
+    }
+
+    let needle = if $contains != null { ($contains | str downcase | str trim) } else { null }
+    mut files = (glob $"($target_path)/**")
+    $files = ($files | where { |entry| (try { ($entry | path type) == "file" } catch { false }) })
+
+    if $needle != null {
+        $files = ($files | where { |entry| (($entry | into string | str downcase) | str contains $needle) })
+    }
+
+    let rows = ($files | each { |entry|
+        let meta = (try { ls -a $entry | first } catch { null })
+        if $meta == null {
+            null
+        } else {
+            let digest = if $with_hash {
+                (try { open --raw $entry | hash sha256 } catch { "-" })
+            } else {
+                "-"
+            }
+
+            {
+                path: ($entry | into string)
+                size: (try { $meta.size } catch { 0 })
+                modified: (try { $meta.modified } catch { null })
+                created: (try { $meta.created } catch { null })
+                sha256: $digest
+            }
+        }
+    } | where { |item| $item != null } | sort-by modified -r)
+
+    if $limit > 0 { $rows | first $limit } else { $rows }
 }
 
 # Hunt possible C2 domains using hednsextractor
