@@ -1,45 +1,15 @@
 $env.config.buffer_editor = "vim" # Can be anything for ex. (nvim, nano, ...)
 $env.config.show_banner = false
 
-# Returns true if command exists in PATH
-def has-cmd [command: string] {
-    (try {
-        let command_paths = (which --all $command | get path)
-        (($command_paths | where {|candidate| ($candidate | path exists)} | length) > 0)
-    } catch {
-        false
-    })
+# Ensure HOME exists on Windows sessions
+let is_windows = (($nu.os-info.name | str downcase) == "windows")
+if ($is_windows and ($env.HOME? == null) and ($env.USERPROFILE? != null)) {
+    $env.HOME = $env.USERPROFILE
 }
 
-# Install a Go tool if it is not available in PATH
-def ensure-go-tool [binary: string, package: string] {
-    if (has-cmd $binary) == false {
-        if (has-cmd "go") == false {
-            error make { msg: "Go is not installed. Please install Go first." }
-        }
-        print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Installing: (ansi green_bold)($binary)(ansi reset)"
-        go install -v $package
-    }
-}
-
-# Read or prompt/store WHOISXMLAPI key
-def get-whoisxml-key [] {
-    let key_file = $"($env.HOME)/.whoisxmlkey.txt"
-    if ($key_file | path exists) {
-        open $key_file | str trim
-    } else {
-        let api_key = (input $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Enter your WHOISXMLAPI key: " | str trim)
-        if $api_key == "" {
-            error make { msg: "WHOISXMLAPI key cannot be empty." }
-        }
-        $api_key | save -f $key_file
-        print $"\n(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Key saved."
-        $api_key
-    }
-}
-
-# Parse environment flags safely (supports bool and common string values)
-def env-flag-enabled [value: any] {
+# Optional startup system info; set $env.NUSECURITY_SHOW_SYSINFO = true to enable
+let show_sysinfo = (try {
+    let value = $env.NUSECURITY_SHOW_SYSINFO?
     if $value == null {
         false
     } else if (($value | describe) == "bool") {
@@ -48,35 +18,46 @@ def env-flag-enabled [value: any] {
         let normalized = ($value | into string | str trim | str downcase)
         $normalized in ["1", "true", "yes", "on"]
     }
-}
+} catch {
+    false
+})
 
-# Optional startup system info; set $env.NUSECURITY_SHOW_SYSINFO = true to enable
-if ((env-flag-enabled ($env.NUSECURITY_SHOW_SYSINFO?)) and (has-cmd "neofetch")) {
+let has_neofetch = (try {
+    let command_paths = (which --all neofetch | where type == "external" | get path)
+    (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+} catch {
+    false
+})
+
+if ($show_sysinfo and $has_neofetch) {
     neofetch
 }
 
 # Add Go paths
-for go_path in [$"($env.HOME)/go/bin", "/usr/local/go/bin"] {
+let go_paths = if $is_windows {
+    let windows_go = if ($env.ProgramFiles? != null) {
+        $"($env.ProgramFiles)\\Go\\bin"
+    } else {
+        "C:\\Program Files\\Go\\bin"
+    }
+    [$"($env.HOME)\\go\\bin", $windows_go]
+} else {
+    [$"($env.HOME)/go/bin", "/usr/local/go/bin"]
+}
+
+for go_path in $go_paths {
     if (($env.PATH | to text | str contains $go_path) == false) {
         $env.PATH ++= [$go_path]
     }
 }
 
-# Skeleton of the prompt
-def left_prompt [] {
-    # Function to get the username
+# Apply the custom prompt
+$env.PROMPT_COMMAND = {
     let username = (whoami | str trim)
-
-    # Function to get the hostname
     let hostname = (hostname | str trim)
-
-    # Function to get the current directory
     let current_dir = (pwd)
     $"\n(ansi blue_bold)<----- ($username)@($hostname) ----->\n[(ansi red)($current_dir)(ansi blue_bold)]"
 }
-
-# Apply the custom prompt
-$env.PROMPT_COMMAND = { left_prompt }
 $env.PROMPT_INDICATOR = $"(ansi blue_bold)>> "
 
 # Get information about the target IP address using bgpview
@@ -130,31 +111,80 @@ def drmi [target_id: string] {
 
 # Install desired package
 def aget [target_package: string] {
-    sudo apt install -y $target_package
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
+    if $is_windows {
+        if (do $has_cmd "winget") {
+            winget install --accept-source-agreements --accept-package-agreements $target_package
+        } else {
+            error make { msg: "winget not found. Install App Installer from Microsoft Store first." }
+        }
+    } else {
+        sudo apt install -y $target_package
+    }
 }
 
 # Remove package
 def arem [target_package: string] {
-    sudo apt remove $target_package
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
+    if $is_windows {
+        if (do $has_cmd "winget") {
+            winget uninstall $target_package
+        } else {
+            error make { msg: "winget not found. Install App Installer from Microsoft Store first." }
+        }
+    } else {
+        sudo apt remove $target_package
+    }
 }
 
 # List connections and listening ports
 def netcon [] {
-    lsof -i4 -V -E -R | awk '$1 ~ /:*(-|$)/{ gsub(/:[^-]*/, "", $1); print $1,$2,$3,$4,$9,$10,$11 }' | to text | lines | split column " " | rename COMMAND PID PPID USER PROTO CONNECTION STATUS | skip 1
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let has_external_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | where type == "external" | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
+    if $is_windows {
+        netstat -ano | lines | where { |line| ($line | str trim) =~ "LISTENING" }
+    } else {
+        if (do $has_external_cmd "lsof") {
+            lsof -i4 -V -E -R | awk '$1 ~ /:*(-|$)/{ gsub(/:[^-]*/, "", $1); print $1,$2,$3,$4,$9,$10,$11 }' | to text | lines | split column " " | rename COMMAND PID PPID USER PROTO CONNECTION STATUS | skip 1
+        } else if (do $has_external_cmd "ss") {
+            ss -lntup
+        } else if (do $has_external_cmd "netstat") {
+            netstat -tulpn
+        } else {
+            error make { msg: "No supported network tool found (lsof/ss/netstat)." }
+        }
+    }
 }
 
 # Fetch last 50 C2 panel from Viriback
 def vrb [] {
     http get https://tracker.viriback.com/last50.php | to json | from json
-}
-
-# Extract host from URLHAUS URL row
-def haus-url-host [url_value: string] {
-    (try {
-        $url_value | parse --regex '^https?://([^/:?#]+)' | get 0.capture0
-    } catch {
-        null
-    })
 }
 
 # Fetch data from URLHAUS
@@ -168,6 +198,14 @@ def haus [
     --https-only                 # Keep only https URLs
     --raw                        # Return raw feed without cleanup/filtering
 ] {
+    let url_host = { |url_value: string|
+        (try {
+            $url_value | parse --regex '^https?://([^/:?#]+)' | get 0.capture0
+        } catch {
+            null
+        })
+    }
+
     let normalized_type = ($datatype | str trim | str downcase)
     let source_type = if ($normalized_type in ["normal", "full"]) {
         "normal"
@@ -209,7 +247,7 @@ def haus [
         if ($host_contains != null) {
             let needle = ($host_contains | str downcase)
             $urls = ($urls | where { |u|
-                let host = (haus-url-host $u)
+                let host = (do $url_host $u)
                 $host != null and ($host | str downcase | str contains $needle)
             })
         }
@@ -217,13 +255,13 @@ def haus [
         if ($host_ends_with != null) {
             let suffix = ($host_ends_with | str downcase)
             $urls = ($urls | where { |u|
-                let host = (haus-url-host $u)
+                let host = (do $url_host $u)
                 $host != null and ($host | str downcase | str ends-with $suffix)
             })
         }
 
         if $host_only {
-            let hosts = ($urls | each { |u| haus-url-host $u } | where { |h| $h != null and ($h | str trim) != "" } | uniq)
+            let hosts = ($urls | each { |u| do $url_host $u } | where { |h| $h != null and ($h | str trim) != "" } | uniq)
             if $limit > 0 { $hosts | first $limit } else { $hosts }
         } else {
             if $limit > 0 { $urls | first $limit } else { $urls }
@@ -259,10 +297,25 @@ def tfox [--dtype: string] {
 
 # Perform httpx scan against list of urls
 def hx [listfile: string] {
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
     if (($listfile | path exists) == false) {
         error make { msg: $"List file not found: ($listfile)" }
     }
-    ensure-go-tool "httpx" "github.com/projectdiscovery/httpx/cmd/httpx@latest"
+    if ((do $has_cmd "httpx") == false) {
+        if ((do $has_cmd "go") == false) {
+            error make { msg: "Go is not installed. Please install Go first." }
+        }
+        print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Installing: (ansi green_bold)httpx(ansi reset)"
+        go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+    }
     httpx -l $listfile -silent -td -title -sc
 }
 
@@ -274,10 +327,50 @@ def pdsc [tool_name: string] {
 
 # Get user defined commands/aliases
 def hlp [--verbose (-v)] {
-    if ($verbose) {
-        help commands | where command_type =~ "custom" | select name description params
-    } else {
-        help commands | where command_type =~ "custom" | select name description
+    let commands = (help commands | where command_type =~ "custom")
+    if ($verbose == false) {
+        return ($commands | select name description)
+    }
+
+    let format_usage_part = { |param: record|
+        let is_option = ($param.name | str starts-with "--")
+        if $is_option {
+            if $param.type == "switch" {
+                if $param.required { $param.name } else { $"[($param.name)]" }
+            } else {
+                if $param.required {
+                    $"($param.name) <($param.type)>"
+                } else {
+                    $"[($param.name) <($param.type)>]"
+                }
+            }
+        } else {
+            if $param.required {
+                $"<($param.name):($param.type)>"
+            } else {
+                $"[($param.name):($param.type)]"
+            }
+        }
+    }
+
+    let format_param_detail = { |param: record|
+        let requirement = if $param.required { "required" } else { "optional" }
+        let desc = (if (($param.description | str trim) == "") { "-" } else { $param.description })
+        $"($param.name): type=($param.type), ($requirement), desc=($desc)"
+    }
+
+    $commands | each { |cmd|
+        let command_params = ($cmd.params | where { |p| ($p.name | str starts-with "--help") == false })
+        let usage_parts = ($command_params | each { |p| do $format_usage_part $p })
+        let param_details = ($command_params | each { |p| do $format_param_detail $p })
+        let io_info = (if (($cmd.input_output | length) == 0) { "-" } else { $cmd.input_output | to text | str trim })
+        {
+            name: $cmd.name
+            description: $cmd.description
+            usage: (([$cmd.name] | append $usage_parts) | str join " ")
+            params_detail: (if (($param_details | length) == 0) { "-" } else { $param_details | str join " | " })
+            io: $io_info
+        }
     }
 }
 
@@ -293,10 +386,25 @@ def bdc [pattern: string] {
 
 # Hunt possible C2 domains using hednsextractor
 def hdns [target_domain: string] {
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
     if (($target_domain | str trim) == "") {
         error make { msg: "Target domain cannot be empty." }
     }
-    ensure-go-tool "hednsextractor" "github.com/HuntDownProject/hednsextractor/cmd/hednsextractor@latest"
+    if ((do $has_cmd "hednsextractor") == false) {
+        if ((do $has_cmd "go") == false) {
+            error make { msg: "Go is not installed. Please install Go first." }
+        }
+        print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Installing: (ansi green_bold)hednsextractor(ansi reset)"
+        go install -v github.com/HuntDownProject/hednsextractor/cmd/hednsextractor@latest
+    }
     echo $target_domain | hednsextractor -silent -only-domains
 }
 
@@ -312,11 +420,29 @@ def upc [] {
 
 #System Cleaner
 def clean [] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
     let confirm = (input $"(ansi red_bold)System cache will be cleaned. Are you sure? [Y/n]: (ansi reset)" | str trim | str downcase)
     if $confirm == "y" or $confirm == "" {
-        sudo apt autoremove -y
-        sudo apt autoclean -y
-        sudo rm -rf ~/.cache/*
+        if $is_windows {
+            if (do $has_cmd "powershell") {
+                powershell -NoProfile -Command 'Get-ChildItem -Path $env:TEMP -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue'
+            } else {
+                error make { msg: "powershell not found in PATH." }
+            }
+        } else {
+            sudo apt autoremove -y
+            sudo apt autoclean -y
+            sudo rm -rf ~/.cache/*
+        }
         echo "System Cleaned!"
     } else {
         echo "Operation cancelled."
@@ -330,25 +456,55 @@ def arpt [] {
 
 # Search for target file in the system
 def ff [target_file: string] {
-    if (has-cmd "fdfind") {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let has_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+    let has_external_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | where type == "external" | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
+    if $is_windows {
+        let matches = (glob $"**/*($target_file)*" | where { |entry| ($entry | path type) == "file" })
+        $matches
+        return
+    }
+
+    if (do $has_external_cmd "fdfind") {
         fdfind -H --glob -t f $target_file / | lines
     } else {
-        if (has-cmd "apt") and (has-cmd "sudo") {
+        if (do $has_cmd "apt") and (do $has_cmd "sudo") {
             print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi red_bold) fd-find not found, installing automatically...(ansi reset)"
             aget fd-find
         }
 
-        if (has-cmd "fdfind") {
+        if (do $has_external_cmd "fdfind") {
             fdfind -H --glob -t f $target_file / | lines
         } else {
-            print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi yellow_bold) Falling back to 'find'(ansi reset)"
-            ^find / -type f -iname $"*($target_file)*" err> /dev/null | lines
+            print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi yellow_bold) Falling back to recursive glob in current directory(ansi reset)"
+            glob $"**/*($target_file)*" | where { |entry| ($entry | path type) == "file" }
         }
     }
 }
 
 # List active and inactive services
 def serv [] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    if $is_windows {
+        powershell -NoProfile -Command 'Get-Service | Select-Object Name,Status | Sort-Object Name'
+        return
+    }
+
     let services = (ls /etc/init.d/ | get name) 
     $services | each { |serv_path|
         let serv_name = ($serv_path | path basename | str trim)
@@ -365,11 +521,34 @@ def serv [] {
 
 # List disk partitions (lsblk with style!)
 def dls [] {
-    lsblk -r | lines | split column " " | skip 1 |select column1 column2 column3 column4 column5 column6 column7 | rename NAME MAJ:MIN RM SIZE RO TYPE MOUNTPOINTS
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    let has_external_cmd = { |command: string|
+        (try {
+            let command_paths = (which --all $command | where type == "external" | get path)
+            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
+        } catch {
+            false
+        })
+    }
+
+    if $is_windows {
+        sys disks
+    } else {
+        if (do $has_external_cmd "lsblk") {
+            lsblk -r | lines | split column " " | skip 1 |select column1 column2 column3 column4 column5 column6 column7 | rename NAME MAJ:MIN RM SIZE RO TYPE MOUNTPOINTS
+        } else {
+            sys disks
+        }
+    }
 }
 
 # Format/fix USB or USB like devices
 def fixu [target_disk: string] {
+    let is_windows = (($nu.os-info.name | str downcase) == "windows")
+    if $is_windows {
+        error make { msg: "fixu is disabled on Windows. Use Disk Management or diskpart carefully." }
+    }
+
     print $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Formatting: (ansi green_bold)($target_disk)(ansi reset)"
     sudo wipefs --all $target_disk
     sudo mkfs.vfat -F 32 $target_disk
@@ -386,7 +565,7 @@ def yrs [target_file: string] {
         for rul in ($rule_arr) {
             if (($rul | str contains ".yar") == true) {
                 try {
-                    let rulz = (yara -w $rul $target_file err> /dev/null | str replace --all $target_file "")
+                    let rulz = (yara -w $rul $target_file | str replace --all $target_file "")
                     for rr in ($rulz) {
                         if (($matched_rules | to text | str contains $rr) == false) {
                             $matched_rules ++= [$rr]
@@ -403,93 +582,6 @@ def yrs [target_file: string] {
     }
 }
 
-# Safe field read from record
-def rware-field [entry: record, field: string] {
-    if ($entry | columns | any { |column| $column == $field }) {
-        (try { $entry | get $field | into string | str trim } catch { "" })
-    } else {
-        ""
-    }
-}
-
-# Return first non-empty value
-def rware-first-nonempty [values: list<any>] {
-    (try {
-        $values
-        | each { |v| $v | into string | str trim }
-        | where { |v| $v != "" }
-        | first
-    } catch {
-        ""
-    })
-}
-
-# Build stable identifier for ransomware entries
-def rware-entry-id [entry: record] {
-    let url_id = (rware-first-nonempty [
-        (rware-field $entry "url")
-        (rware-field $entry "post_url")
-        (rware-field $entry "claim_url")
-    ])
-
-    if $url_id != "" {
-        $url_id
-    } else {
-        let victim = (rware-first-nonempty [(rware-field $entry "victim"), (rware-field $entry "post_title")])
-        let group = (rware-first-nonempty [(rware-field $entry "group"), (rware-field $entry "group_name")])
-        let published = (rware-first-nonempty [(rware-field $entry "attackdate"), (rware-field $entry "published"), (rware-field $entry "discovered")])
-        $"($victim)|($group)|($published)"
-    }
-}
-
-# Parse entry timestamp to datetime (best effort)
-def rware-entry-datetime [entry: record] {
-    let raw_value = (rware-first-nonempty [
-        (rware-field $entry "discovered")
-        (rware-field $entry "published")
-        (rware-field $entry "attackdate")
-    ])
-
-    if $raw_value == "" {
-        null
-    } else {
-        (try { $raw_value | into datetime } catch { null })
-    }
-}
-
-# Fetch and shape ransomware feed
-def rware-fetch [country_code?: string] {
-    if ($country_code != null and (($country_code | str trim) != "")) {
-        let code = ($country_code | str trim | str upcase)
-        let data = (http get $"https://api.ransomware.live/v2/countryvictims/($code)" | to json | from json)
-        $data | each { |d|
-            {
-                post_title: $d.post_title
-                published: $d.published
-                group_name: $d.group_name
-                website: $d.website
-                post_url: $d.post_url
-                country: (try { $d.country } catch { "" })
-                discovered: (try { $d.discovered } catch { "" })
-            }
-        }
-    } else {
-        let data = (http get "https://api.ransomware.live/v2/recentvictims" | to json | from json)
-        $data | each { |d|
-            {
-                victim: $d.victim
-                attackdate: $d.attackdate
-                group: $d.group
-                domain: $d.domain
-                country: $d.country
-                url: $d.url
-                claim_url: $d.claim_url
-                discovered: (try { $d.discovered } catch { "" })
-            }
-        }
-    }
-}
-
 # Fetch ransomware victims (country or global) with optional monitoring mode
 def rware [
     country_code?: string   # Optional ISO country code (TR, US). If empty, uses global recent feed.
@@ -498,13 +590,95 @@ def rware [
     --interval: int = 30    # Monitor poll interval in seconds
     --max-cycles: int = 0   # Monitor loop count (0 = infinite)
 ] {
+    let field = { |entry: record, field_name: string|
+        if ($entry | columns | any { |column| $column == $field_name }) {
+            (try { $entry | get $field_name | into string | str trim } catch { "" })
+        } else {
+            ""
+        }
+    }
+
+    let first_nonempty = { |values: list<any>|
+        (try {
+            $values
+            | each { |v| $v | into string | str trim }
+            | where { |v| $v != "" }
+            | first
+        } catch {
+            ""
+        })
+    }
+
+    let entry_id = { |entry: record|
+        let url_id = (do $first_nonempty [
+            (do $field $entry "url")
+            (do $field $entry "post_url")
+            (do $field $entry "claim_url")
+        ])
+
+        if $url_id != "" {
+            $url_id
+        } else {
+            let victim = (do $first_nonempty [(do $field $entry "victim"), (do $field $entry "post_title")])
+            let group = (do $first_nonempty [(do $field $entry "group"), (do $field $entry "group_name")])
+            let published = (do $first_nonempty [(do $field $entry "attackdate"), (do $field $entry "published"), (do $field $entry "discovered")])
+            $"($victim)|($group)|($published)"
+        }
+    }
+
+    let entry_datetime = { |entry: record|
+        let raw_value = (do $first_nonempty [
+            (do $field $entry "discovered")
+            (do $field $entry "published")
+            (do $field $entry "attackdate")
+        ])
+
+        if $raw_value == "" {
+            null
+        } else {
+            (try { $raw_value | into datetime } catch { null })
+        }
+    }
+
+    let fetch = { |selected_country_code?|
+        if ($selected_country_code != null and (($selected_country_code | str trim) != "")) {
+            let code = ($selected_country_code | str trim | str upcase)
+            let data = (http get $"https://api.ransomware.live/v2/countryvictims/($code)" | to json | from json)
+            $data | each { |d|
+                {
+                    post_title: $d.post_title
+                    published: $d.published
+                    group_name: $d.group_name
+                    website: $d.website
+                    post_url: $d.post_url
+                    country: (try { $d.country } catch { "" })
+                    discovered: (try { $d.discovered } catch { "" })
+                }
+            }
+        } else {
+            let data = (http get "https://api.ransomware.live/v2/recentvictims" | to json | from json)
+            $data | each { |d|
+                {
+                    victim: $d.victim
+                    attackdate: $d.attackdate
+                    group: $d.group
+                    domain: $d.domain
+                    country: $d.country
+                    url: $d.url
+                    claim_url: $d.claim_url
+                    discovered: (try { $d.discovered } catch { "" })
+                }
+            }
+        }
+    }
+
     if $interval < 5 {
         error make { msg: "--interval must be at least 5 seconds" }
     }
 
     if $monitor {
         let monitor_started_at = (date now)
-        let initial = (rware-fetch $country_code)
+        let initial = (do $fetch $country_code)
         let initial_total = ($initial | length)
         let first_batch = if $limit > 0 { $initial | first $limit } else { $initial }
         print $"(ansi cyan_bold)[rware](ansi reset) Monitoring started. Baseline entries: ($initial_total). Interval: ($interval)s"
@@ -512,7 +686,7 @@ def rware [
             print ($first_batch | table -e)
         }
 
-        mut seen_ids = ($initial | each { |entry| rware-entry-id $entry } | uniq)
+        mut seen_ids = ($initial | each { |entry| do $entry_id $entry } | uniq)
         mut cycle = 0
 
         loop {
@@ -521,12 +695,12 @@ def rware [
             }
 
             sleep ($interval * 1sec)
-            let latest = (rware-fetch $country_code)
+            let latest = (do $fetch $country_code)
             let new_entries = ($latest | where { |entry|
-                let entry_id = (rware-entry-id $entry)
-                let entry_time = (rware-entry-datetime $entry)
+                let current_entry_id = (do $entry_id $entry)
+                let entry_time = (do $entry_datetime $entry)
                 let is_recent = if $entry_time == null { true } else { $entry_time >= $monitor_started_at }
-                $is_recent and (($seen_ids | any { |id| $id == $entry_id }) == false)
+                $is_recent and (($seen_ids | any { |id| $id == $current_entry_id }) == false)
             })
 
             if (($new_entries | length) > 0) {
@@ -536,12 +710,12 @@ def rware [
                 print ($out | table -e)
             }
 
-            let latest_ids = ($latest | each { |entry| rware-entry-id $entry })
+            let latest_ids = ($latest | each { |entry| do $entry_id $entry })
             $seen_ids = (($seen_ids | append $latest_ids | uniq | last 5000))
             $cycle = ($cycle + 1)
         }
     } else {
-        let data = (rware-fetch $country_code)
+        let data = (do $fetch $country_code)
         if $limit > 0 { $data | first $limit } else { $data }
     }
 }
@@ -578,14 +752,36 @@ def crt [target_domain: string] {
 
 # Perform reverse IP lookup
 def rip [target_ipaddr: string] {
-    let api_key = (get-whoisxml-key)
+    let key_file = $"($env.HOME)/.whoisxmlkey.txt"
+    let api_key = if ($key_file | path exists) {
+        open $key_file | str trim
+    } else {
+        let entered_key = (input $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Enter your WHOISXMLAPI key: " | str trim)
+        if $entered_key == "" {
+            error make { msg: "WHOISXMLAPI key cannot be empty." }
+        }
+        $entered_key | save -f $key_file
+        print $"\n(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Key saved."
+        $entered_key
+    }
     let response = (http get $"https://reverse-ip.whoisxmlapi.com/api/v1?apiKey=($api_key)&ip=($target_ipaddr)" | get result)
     $response
 }
 
 # Perform DNS Chronicle lookup
 def dchr [target_domain: string] {
-    let api_key = (get-whoisxml-key)
+    let key_file = $"($env.HOME)/.whoisxmlkey.txt"
+    let api_key = if ($key_file | path exists) {
+        open $key_file | str trim
+    } else {
+        let entered_key = (input $"(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Enter your WHOISXMLAPI key: " | str trim)
+        if $entered_key == "" {
+            error make { msg: "WHOISXMLAPI key cannot be empty." }
+        }
+        $entered_key | save -f $key_file
+        print $"\n(ansi cyan_bold)[(ansi red_bold)+(ansi cyan_bold)](ansi reset) Key saved."
+        $entered_key
+    }
     let response = (http post --content-type application/json https://dns-history.whoisxmlapi.com/api/v1 {"apiKey": $api_key, "searchType": "forward", "recordType": "a", "domainName": $target_domain} | get result)
     if (($response | get count) > 0) {
         $response | get records
@@ -597,9 +793,14 @@ def gf [target_url: string] {
     http get $target_url | lines | parse --regex 'href="([^"]+)"' | rename Files
 }
 
-# Known-good infrastructure filter to reduce noisy C2 candidates
-def triage-benign-host [host: string] {
-    let normalized = ($host | str downcase | str trim)
+# Triage IoC query
+def triage [
+    --family: string    # For ex: snakekeylogger
+    --query: string     # For ex: domain, hash etc.
+    --limit: int = 10   # Max report count
+    --no-c2             # Skip C2 candidate extraction
+    --no-config         # Skip malware config extraction
+] {
     let known_benign = [
         "bing.com"
         "bing.net"
@@ -621,267 +822,250 @@ def triage-benign-host [host: string] {
         "cloudflare.com"
     ]
 
-    (($known_benign | where { |item|
-        ($normalized == $item) or ($normalized | str ends-with $".($item)")
-    } | length) > 0)
-}
-
-# Extract host portion from a URL string
-def triage-url-host [url_value: string] {
-    let cleaned = ($url_value | str replace --all "\\u0026" "&" | str replace --all "\\/" "/")
-    (try {
-        $cleaned | parse --regex '^https?://([^/:?#]+)' | get 0.capture0
-    } catch {
-        null
-    })
-}
-
-# Basic host scoring for likely malicious destinations
-def triage-suspicious-host [host: string] {
-    let normalized = ($host | str downcase | str trim)
-    if $normalized == "" {
-        false
-    } else if (triage-benign-host $normalized) {
-        false
-    } else if (
-        ($normalized | str starts-with "10.")
-        or ($normalized | str starts-with "127.")
-        or ($normalized | str starts-with "192.168.")
-        or ($normalized | str starts-with "169.254.")
-        or ($normalized | str starts-with "0.")
-    ) {
-        false
-    } else if (($normalized | str starts-with "172.") and (try {
-        let second_octet = ($normalized | split row "." | get 1 | into int)
-        $second_octet >= 16 and $second_octet <= 31
-    } catch {
-        false
-    })) {
-        false
-    } else {
-        true
-    }
-}
-
-# Check if value is an IPv4 literal
-def triage-is-ipv4 [value: string] {
-    (($value | str trim | parse --regex '^(?:\d{1,3}\.){3}\d{1,3}$' | length) > 0)
-}
-
-# Fetch behavioral report HTML
-def triage-behavior-html [report_id: string] {
-    let behavior_url = $"https://tria.ge/($report_id)/behavioral1"
-    (try { http get $behavior_url } catch { "" })
-}
-
-# Return first regex capture or empty string
-def triage-first-capture [source: string, pattern: string] {
-    (try {
-        $source | parse --regex $pattern | get 0.capture0 | str trim
-    } catch {
-        ""
-    })
-}
-
-# Strip basic HTML tags/entities for readable summaries
-def triage-clean-html-text [value: string] {
-    ($value
-        | str replace --all --regex '<[^>]+>' ''
-        | str replace --all '&amp;' '&'
-        | str replace --all '&#160;' ' '
-        | str replace --all '&nbsp;' ' '
-        | str replace --all '&quot;' '"'
-        | str replace --all '&#39;' "'"
-        | str replace --all '&#10;' ' '
-        | str replace --all '&#13;' ' '
-        | str trim)
-}
-
-# Extract content block for a malware-config heading
-def triage-config-block [config_section: string, heading: string] {
-    let marker = $"<div class=\"config-entry-heading\">($heading)</div>"
-    (try {
-        $config_section
-        | split row $marker
-        | get 1
-        | split row '<div class="config-entry-heading">'
-        | get 0
-    } catch {
-        ""
-    })
-}
-
-# Normalize scraped config lists to clean unique text values
-def triage-clean-list [items: list<any>, limit: int = 3] {
-    ($items
-        | each { |item| triage-clean-html-text ($item | into string) }
-        | where { |v| ($v | str trim) != "" }
-        | uniq
-        | first $limit)
-}
-
-# Pull candidate C2 hosts from behavioral HTML
-def triage-c2-candidates [behavior_html: string] {
-
-    if (($behavior_html | str length) == 0) {
-        return "-"
+    let benign_host = { |host: string|
+        let normalized = ($host | str downcase | str trim)
+        (($known_benign | where { |item|
+            ($normalized == $item) or ($normalized | str ends-with $".($item)")
+        } | length) > 0)
     }
 
-    let raw_urls = (try {
-        $behavior_html | parse --regex '"url":"(https?://[^"]+)"' | get capture0
-    } catch {
-        []
-    })
-    let flow_pairs = (try {
-        $behavior_html | parse --regex '"domain":"([^"]+)","dst":"([^"]+)"'
-    } catch {
-        []
-    })
-
-    let download_urls = ($raw_urls | where { |u|
-        ($u | str downcase) =~ '\.(bin|exe|dll|dat|ps1|vbs|scr|bat|cmd|zip|rar|7z|hta|msi|jar)(\?|$)'
-    })
-
-    let download_hosts = ($download_urls | each { |u| triage-url-host $u } | where { |h| $h != null and ($h | str trim) != "" })
-    let url_hosts = ($raw_urls | each { |u| triage-url-host $u } | where { |h| $h != null and ($h | str trim) != "" })
-    let ipv4_hosts = ($url_hosts | where { |h| triage-is-ipv4 $h })
-
-    let candidates = ($download_hosts | append $ipv4_hosts | uniq | where { |h| triage-suspicious-host $h })
-    mut ip_domain_pairs = []
-
-    for pair in $flow_pairs {
-        let flow_domain = $pair.capture0
-        let dst_host = (try {
-            $pair.capture1 | parse --regex '^([^:]+)' | get 0.capture0
+    let url_host = { |url_value: string|
+        let cleaned = ($url_value | str replace --all "\\u0026" "&" | str replace --all "\\/" "/")
+        (try {
+            $cleaned | parse --regex '^https?://([^/:?#]+)' | get 0.capture0
         } catch {
-            ""
+            null
         })
+    }
 
-        if (
-            (triage-is-ipv4 $dst_host)
-            and ((triage-is-ipv4 $flow_domain) == false)
-            and (triage-suspicious-host $flow_domain)
+    let is_ipv4 = { |value: string|
+        (($value | str trim | parse --regex '^(?:\d{1,3}\.){3}\d{1,3}$' | length) > 0)
+    }
+
+    let suspicious_host = { |host: string|
+        let normalized = ($host | str downcase | str trim)
+        if $normalized == "" {
+            false
+        } else if (do $benign_host $normalized) {
+            false
+        } else if (
+            ($normalized | str starts-with "10.")
+            or ($normalized | str starts-with "127.")
+            or ($normalized | str starts-with "192.168.")
+            or ($normalized | str starts-with "169.254.")
+            or ($normalized | str starts-with "0.")
         ) {
-            $ip_domain_pairs ++= [{ ip: $dst_host, domain: $flow_domain }]
+            false
+        } else if (($normalized | str starts-with "172.") and (try {
+            let second_octet = ($normalized | split row "." | get 1 | into int)
+            $second_octet >= 16 and $second_octet <= 31
+        } catch {
+            false
+        })) {
+            false
+        } else {
+            true
         }
     }
 
-    mut formatted_candidates = []
-    for host in $candidates {
-        if (triage-is-ipv4 $host) {
-            let mapped_domains = (try {
-                $ip_domain_pairs | where ip == $host | get domain | uniq
+    let behavior_html = { |report_id: string|
+        let behavior_url = $"https://tria.ge/($report_id)/behavioral1"
+        (try { http get $behavior_url } catch { "" })
+    }
+
+    let first_capture = { |source: string, pattern: string|
+        (try {
+            $source | parse --regex $pattern | get 0.capture0 | str trim
+        } catch {
+            ""
+        })
+    }
+
+    let clean_html_text = { |value: string|
+        ($value
+            | str replace --all --regex '<[^>]+>' ''
+            | str replace --all '&amp;' '&'
+            | str replace --all '&#160;' ' '
+            | str replace --all '&nbsp;' ' '
+            | str replace --all '&quot;' '"'
+            | str replace --all '&#39;' "'"
+            | str replace --all '&#10;' ' '
+            | str replace --all '&#13;' ' '
+            | str trim)
+    }
+
+    let config_block = { |config_section: string, heading: string|
+        let marker = $"<div class=\"config-entry-heading\">($heading)</div>"
+        (try {
+            $config_section
+            | split row $marker
+            | get 1
+            | split row '<div class="config-entry-heading">'
+            | get 0
+        } catch {
+            ""
+        })
+    }
+
+    let clean_list = { |items: list<any>, list_limit: int = 3|
+        ($items
+            | each { |item| do $clean_html_text ($item | into string) }
+            | where { |v| ($v | str trim) != "" }
+            | uniq
+            | first $list_limit)
+    }
+
+    let c2_candidates = { |current_behavior_html: string|
+        if (($current_behavior_html | str length) == 0) {
+            return "-"
+        }
+
+        let raw_urls = (try {
+            $current_behavior_html | parse --regex '"url":"(https?://[^"]+)"' | get capture0
+        } catch {
+            []
+        })
+        let flow_pairs = (try {
+            $current_behavior_html | parse --regex '"domain":"([^"]+)","dst":"([^"]+)"'
+        } catch {
+            []
+        })
+
+        let download_urls = ($raw_urls | where { |u|
+            ($u | str downcase) =~ '\.(bin|exe|dll|dat|ps1|vbs|scr|bat|cmd|zip|rar|7z|hta|msi|jar)(\?|$)'
+        })
+
+        let download_hosts = ($download_urls | each { |u| do $url_host $u } | where { |h| $h != null and ($h | str trim) != "" })
+        let url_hosts = ($raw_urls | each { |u| do $url_host $u } | where { |h| $h != null and ($h | str trim) != "" })
+        let ipv4_hosts = ($url_hosts | where { |h| do $is_ipv4 $h })
+
+        let candidates = ($download_hosts | append $ipv4_hosts | uniq | where { |h| do $suspicious_host $h })
+        mut ip_domain_pairs = []
+
+        for pair in $flow_pairs {
+            let flow_domain = $pair.capture0
+            let dst_host = (try {
+                $pair.capture1 | parse --regex '^([^:]+)' | get 0.capture0
             } catch {
-                []
+                ""
             })
 
-            if (($mapped_domains | length) > 0) {
-                for domain in ($mapped_domains | first 3) {
-                    $formatted_candidates ++= [$"($domain) [($host)]"]
+            if (
+                (do $is_ipv4 $dst_host)
+                and ((do $is_ipv4 $flow_domain) == false)
+                and (do $suspicious_host $flow_domain)
+            ) {
+                $ip_domain_pairs ++= [{ ip: $dst_host, domain: $flow_domain }]
+            }
+        }
+
+        mut formatted_candidates = []
+        for host in $candidates {
+            if (do $is_ipv4 $host) {
+                let mapped_domains = (try {
+                    $ip_domain_pairs | where ip == $host | get domain | uniq
+                } catch {
+                    []
+                })
+
+                if (($mapped_domains | length) > 0) {
+                    for domain in ($mapped_domains | first 3) {
+                        $formatted_candidates ++= [$"($domain) [($host)]"]
+                    }
+                } else {
+                    $formatted_candidates ++= [$host]
                 }
             } else {
                 $formatted_candidates ++= [$host]
             }
+        }
+
+        let final_candidates = ($formatted_candidates | uniq)
+
+        if (($final_candidates | length) == 0) {
+            "-"
         } else {
-            $formatted_candidates ++= [$host]
+            $final_candidates | first 5 | str join ", "
         }
     }
 
-    let final_candidates = ($formatted_candidates | uniq)
-
-    if (($final_candidates | length) == 0) {
-        "-"
-    } else {
-        $final_candidates | first 5 | str join ", "
-    }
-}
-
-# Pull summarized malware config from behavioral HTML
-def triage-malware-config [behavior_html: string] {
-    let empty_config = {
-        family: "-"
-        version: "-"
-        botnet: "-"
-        c2: []
-        urls: []
-        credentials: []
-        mutex: "-"
-    }
-
-    if (($behavior_html | str length) == 0) {
-        return $empty_config
-    }
-
-    let config_section = (try {
-        $behavior_html
-        | split row '<div id="malware-config-container"'
-        | get 1
-        | split row '<div id="signatures"'
-        | get 0
-    } catch {
-        ""
-    })
-
-    if (($config_section | str length) == 0) {
-        return $empty_config
-    }
-
-    let family = (triage-clean-html-text (triage-first-capture $config_section '(?s)<div class="config-entry-heading">Family</div>.*?<p[^>]*>(.*?)</p>'))
-    let version = (triage-clean-html-text (triage-first-capture $config_section '(?s)<div class="config-entry-heading">Version</div>.*?<p[^>]*>(.*?)</p>'))
-    let botnet = (triage-clean-html-text (triage-first-capture $config_section '(?s)<div class="config-entry-heading">Botnet</div>.*?<p[^>]*>(.*?)</p>'))
-    let mutex = (triage-clean-html-text (triage-first-capture $config_section '(?s)<b>mutex</b><p class="prewrap">(.*?)</p>'))
-
-    let c2_entries = (try {
-        let c2_block = (triage-config-block $config_section "C2")
-        $c2_block | parse --regex '(?s)<p[^>]*>(.*?)</p>' | get capture0
-    } catch {
-        []
-    })
-
-    let url_entries = (try {
-        let urls_block = (triage-config-block $config_section "URLs")
-        $urls_block | parse --regex '(?i)https?://[^<" ]+' | get capture0
-    } catch {
-        []
-    })
-
-    let credential_entries = (try {
-        let cred_block = ($config_section | parse --regex '(?s)<div class="credentials">.*?<ul class="list">(.*?)</ul>' | get 0.capture0)
-        $cred_block
-        | parse --regex '(?s)<li class="nano"><b>(?:<br>)?([^<:]+):\s*</b>(.*?)</li>'
-        | each { |row|
-            let k = (triage-clean-html-text $row.capture0 | str downcase)
-            let v = (triage-clean-html-text $row.capture1)
-            if ($k != "" and $v != "") { $"($k)=($v)" } else { null }
+    let malware_config = { |current_behavior_html: string|
+        let empty_config = {
+            family: "-"
+            version: "-"
+            botnet: "-"
+            c2: []
+            urls: []
+            credentials: []
+            mutex: "-"
         }
-        | where { |x| $x != null }
-    } catch {
-        []
-    })
 
-    let cleaned_c2 = (triage-clean-list $c2_entries 4)
-    let cleaned_urls = (triage-clean-list $url_entries 3)
-    let cleaned_credentials = (triage-clean-list $credential_entries 8)
+        if (($current_behavior_html | str length) == 0) {
+            return $empty_config
+        }
 
-    {
-        family: (if $family != "" { $family } else { "-" })
-        version: (if $version != "" { $version } else { "-" })
-        botnet: (if $botnet != "" { $botnet } else { "-" })
-        c2: $cleaned_c2
-        urls: $cleaned_urls
-        credentials: $cleaned_credentials
-        mutex: (if $mutex != "" { $mutex } else { "-" })
+        let config_section = (try {
+            $current_behavior_html
+            | split row '<div id="malware-config-container"'
+            | get 1
+            | split row '<div id="signatures"'
+            | get 0
+        } catch {
+            ""
+        })
+
+        if (($config_section | str length) == 0) {
+            return $empty_config
+        }
+
+        let family = (do $clean_html_text (do $first_capture $config_section '(?s)<div class="config-entry-heading">Family</div>.*?<p[^>]*>(.*?)</p>'))
+        let version = (do $clean_html_text (do $first_capture $config_section '(?s)<div class="config-entry-heading">Version</div>.*?<p[^>]*>(.*?)</p>'))
+        let botnet = (do $clean_html_text (do $first_capture $config_section '(?s)<div class="config-entry-heading">Botnet</div>.*?<p[^>]*>(.*?)</p>'))
+        let mutex = (do $clean_html_text (do $first_capture $config_section '(?s)<b>mutex</b><p class="prewrap">(.*?)</p>'))
+
+        let c2_entries = (try {
+            let c2_block = (do $config_block $config_section "C2")
+            $c2_block | parse --regex '(?s)<p[^>]*>(.*?)</p>' | get capture0
+        } catch {
+            []
+        })
+
+        let url_entries = (try {
+            let urls_block = (do $config_block $config_section "URLs")
+            $urls_block | parse --regex '(?i)https?://[^<" ]+' | get capture0
+        } catch {
+            []
+        })
+
+        let credential_entries = (try {
+            let cred_block = ($config_section | parse --regex '(?s)<div class="credentials">.*?<ul class="list">(.*?)</ul>' | get 0.capture0)
+            $cred_block
+            | parse --regex '(?s)<li class="nano"><b>(?:<br>)?([^<:]+):\s*</b>(.*?)</li>'
+            | each { |row|
+                let k = (do $clean_html_text $row.capture0 | str downcase)
+                let v = (do $clean_html_text $row.capture1)
+                if ($k != "" and $v != "") { $"($k)=($v)" } else { null }
+            }
+            | where { |x| $x != null }
+        } catch {
+            []
+        })
+
+        let cleaned_c2 = (do $clean_list $c2_entries 4)
+        let cleaned_urls = (do $clean_list $url_entries 3)
+        let cleaned_credentials = (do $clean_list $credential_entries 8)
+
+        {
+            family: (if $family != "" { $family } else { "-" })
+            version: (if $version != "" { $version } else { "-" })
+            botnet: (if $botnet != "" { $botnet } else { "-" })
+            c2: $cleaned_c2
+            urls: $cleaned_urls
+            credentials: $cleaned_credentials
+            mutex: (if $mutex != "" { $mutex } else { "-" })
+        }
     }
-}
 
-# Triage IoC query
-def triage [
-    --family: string    # For ex: snakekeylogger
-    --query: string     # For ex: domain, hash etc.
-    --limit: int = 10   # Max report count
-    --no-c2             # Skip C2 candidate extraction
-    --no-config         # Skip malware config extraction
-] {
     let base_url = if ($family != null) {
         $"https://tria.ge/s/family:($family)"
     } else if ($query != null) {
@@ -909,15 +1093,15 @@ def triage [
         $selected_rows
     } else {
         $selected_rows | each { |row|
-            let behavior_html = (triage-behavior-html $row.ReportID)
+            let current_behavior_html = (do $behavior_html $row.ReportID)
             mut out = $row
 
             if ($no_c2 == false) {
-                $out = ($out | merge { C2: (triage-c2-candidates $behavior_html) })
+                $out = ($out | merge { C2: (do $c2_candidates $current_behavior_html) })
             }
 
             if ($no_config == false) {
-                $out = ($out | merge { MalwareConfig: (triage-malware-config $behavior_html) })
+                $out = ($out | merge { MalwareConfig: (do $malware_config $current_behavior_html) })
             }
 
             $out

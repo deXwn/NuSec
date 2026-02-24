@@ -8,10 +8,11 @@ Nushell config and helper commands for security research workflows.
 - `nu` (Nushell)
 - Common Linux CLI tools (`python`, `git`, `curl`/network access)
 - Optional: `go` for auto-installing some tools (`httpx`, `hednsextractor`)
-- Optional: `apt` + `sudo` for package helper commands (`aget`, `arem`, `ff` auto-install path)
+- Optional on Linux: `apt` + `sudo` for package helper commands
+- Optional on Windows: `winget` for package helper commands
 
 ## Setup
-Run this in Nushell:
+Run this in Nushell (Linux/macOS/Windows):
 
 ```nu
 cp $nu.config-path $"($nu.config-path).backup"
@@ -67,3 +68,4 @@ After setup, you can pull the latest upstream config from inside Nu:
 ```nu
 upc
 ```
+
