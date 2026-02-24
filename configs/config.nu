@@ -148,14 +148,86 @@ def vrb [] {
     http get https://tracker.viriback.com/last50.php | to json | from json
 }
 
+# Extract host from URLHAUS URL row
+def haus-url-host [url_value: string] {
+    (try {
+        $url_value | parse --regex '^https?://([^/:?#]+)' | get 0.capture0
+    } catch {
+        null
+    })
+}
+
 # Fetch data from URLHAUS
-def haus [datatype: string] {
-    if $datatype == "normal" {
-        http get https://urlhaus.abuse.ch/downloads/text
-    } else if $datatype == "online" {
-        http get https://urlhaus.abuse.ch/downloads/text_online
+def haus [
+    datatype?: string = "online" # online | normal
+    --limit: int = 0             # Limit output rows (0 = unlimited)
+    --host-only                  # Return unique hosts instead of URLs
+    --contains: string           # Case-insensitive contains filter
+    --host-contains: string      # Case-insensitive host contains filter
+    --host-ends-with: string     # Host suffix filter, e.g. .tr
+    --https-only                 # Keep only https URLs
+    --raw                        # Return raw feed without cleanup/filtering
+] {
+    let normalized_type = ($datatype | str trim | str downcase)
+    let source_type = if ($normalized_type in ["normal", "full"]) {
+        "normal"
+    } else if ($normalized_type in ["online", "active"]) {
+        "online"
     } else {
-        "You must use: normal/online"
+        error make { msg: "Invalid datatype. Use: online | normal" }
+    }
+
+    let source_url = if $source_type == "normal" {
+        "https://urlhaus.abuse.ch/downloads/text"
+    } else {
+        "https://urlhaus.abuse.ch/downloads/text_online"
+    }
+
+    let content = (http get $source_url)
+    if $raw {
+        if $limit > 0 {
+            $content | lines | first $limit
+        } else {
+            $content | lines
+        }
+    } else {
+        mut urls = ($content
+            | lines
+            | each { |line| $line | str trim }
+            | where { |line| $line != "" and ($line | str starts-with "http") }
+            | uniq)
+
+        if $https_only {
+            $urls = ($urls | where { |u| $u | str starts-with "https://" })
+        }
+
+        if ($contains != null) {
+            let needle = ($contains | str downcase)
+            $urls = ($urls | where { |u| ($u | str downcase | str contains $needle) })
+        }
+
+        if ($host_contains != null) {
+            let needle = ($host_contains | str downcase)
+            $urls = ($urls | where { |u|
+                let host = (haus-url-host $u)
+                $host != null and ($host | str downcase | str contains $needle)
+            })
+        }
+
+        if ($host_ends_with != null) {
+            let suffix = ($host_ends_with | str downcase)
+            $urls = ($urls | where { |u|
+                let host = (haus-url-host $u)
+                $host != null and ($host | str downcase | str ends-with $suffix)
+            })
+        }
+
+        if $host_only {
+            let hosts = ($urls | each { |u| haus-url-host $u } | where { |h| $h != null and ($h | str trim) != "" } | uniq)
+            if $limit > 0 { $hosts | first $limit } else { $hosts }
+        } else {
+            if $limit > 0 { $urls | first $limit } else { $urls }
+        }
     }
 }
 

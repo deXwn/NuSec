@@ -33,7 +33,10 @@ $env.NUSECURITY_SHOW_SYSINFO = true
 ```nu
 hlp -v                      # list custom commands with parameter details
 chkbgp 8.8.8.8              # BGP information for IP
-haus online                 # URLHaus online feed
+haus                        # URLHaus online feed (default)
+haus normal --limit 20      # full feed, first 20 URLs
+haus --host-only --contains "in.net" --limit 10  # unique hosts filtered by keyword
+haus --host-ends-with ".tr" --host-only --limit 20 # hosts ending with .tr
 tfox --dtype url            # ThreatFox URL-only output
 triage --family agenttesla --limit 5      # fetch reports + C2 candidates
 triage --family remcos --limit 3          # includes C2 + MalwareConfig
@@ -47,6 +50,7 @@ yrs suspicious.bin          # YARA scan using ~/rules
 `triage` C2 output is heuristic and focuses on likely payload/C2 hosts from behavioral requests.
 When available, domains are shown together with IP as `domain [ip]`.
 `MalwareConfig` is now a structured record (`family/version/botnet/c2/urls/credentials/mutex`) for cleaner table output.
+`haus` supports `--limit`, `--host-only`, `--contains`, `--host-contains`, `--host-ends-with`, `--https-only`, and `--raw`.
 
 ## Safety Notes
 - `fixu` formats a disk. Double-check target device before running.
