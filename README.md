@@ -13,6 +13,7 @@ Nushell config and helper commands for security research workflows.
 - Optional on Linux: `journalctl` for richer `log-hunt` output
 - Optional on Windows: `winget` for package helper commands
 - Optional on Windows: `powershell` for `windows-evt-hunt` / `log-hunt` / `persist-hunt`
+- Optional on Windows: `procdump` (Sysinternals) for `proc-dump`
 
 ## Setup
 Run this in Nushell (Linux/macOS/Windows):
@@ -56,6 +57,9 @@ shx example.com             # subfinder + httpx
 yrs suspicious.bin          # YARA scan using ~/rules
 persist-hunt --contains cron --limit 50 # Linux/Windows persistence artifacts
 proc-hunt --min-score 2 --limit 50      # heuristic suspicious process scoring
+proc-dump lsass --out-dir C:\dumps      # dump process memory with ProcDump
+proc-dump --parse ollama.exe_20260225_003106.dmp # parse an existing dump file
+proc-dump ollama.exe --out-dir C:\dumps --parse --parse-limit 30 # dump + parse critical artifacts
 log-hunt "failed password" --since-hours 24 --limit 100 # suspicious log lines
 timeline-lite /var/tmp --with-hash --limit 100 # quick file timeline + optional SHA256
 windows-evt-hunt --log Security --event-id 4625 --since-hours 24 # Windows event triage
@@ -69,6 +73,7 @@ When available, domains are shown together with IP as `domain [ip]`.
 `windows-evt-hunt` is Windows-only and uses PowerShell `Get-WinEvent`.
 `persist-hunt` checks common persistence points (Linux cron/systemd/autostart/shell init, Windows Run keys/startup/scheduled tasks).
 `proc-hunt` is heuristic scoring and may include false positives; tune with `--min-score` and `--contains`.
+`proc-dump` is Windows-only and wraps Sysinternals ProcDump (`-ma` full dump by default, `--mini` for `-mp`); it auto-downloads ProcDump on first use, passes `-accepteula`, and supports `proc-dump --parse <file.dmp>` via strings + regex artifact extraction.
 `log-hunt` reads Linux log files + `journalctl` (if available) or Windows Event Logs.
 `timeline-lite` supports `--with-hash` for SHA256 at extra runtime cost.
 
