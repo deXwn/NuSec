@@ -37,6 +37,9 @@ haus                        # URLHaus online feed (default)
 haus normal --limit 20      # full feed, first 20 URLs
 haus --host-only --contains "in.net" --limit 10  # unique hosts filtered by keyword
 haus --host-ends-with ".tr" --host-only --limit 20 # hosts ending with .tr
+rware TR --limit 20          # country-specific ransomware victims
+rware --limit 20             # global recent ransomware victims
+rware TR --monitor --interval 30  # live monitor mode for newly added entries
 tfox --dtype url            # ThreatFox URL-only output
 triage --family agenttesla --limit 5      # fetch reports + C2 candidates
 triage --family remcos --limit 3          # includes C2 + MalwareConfig
@@ -51,6 +54,7 @@ yrs suspicious.bin          # YARA scan using ~/rules
 When available, domains are shown together with IP as `domain [ip]`.
 `MalwareConfig` is now a structured record (`family/version/botnet/c2/urls/credentials/mutex`) for cleaner table output.
 `haus` supports `--limit`, `--host-only`, `--contains`, `--host-contains`, `--host-ends-with`, `--https-only`, and `--raw`.
+`rware` supports `--monitor`, `--interval`, `--limit`, and `--max-cycles` (test/debug loop count).
 
 ## Safety Notes
 - `fixu` formats a disk. Double-check target device before running.

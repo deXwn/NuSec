@@ -403,20 +403,147 @@ def yrs [target_file: string] {
     }
 }
 
-# Fetch latest ransomware victims by country code
-def rware [country_code: string] {
-    let data = (http get $"https://api.ransomware.live/v2/countryvictims/($country_code)" | to json | from json)
-    mut json_array = []
-    for d in ($data) {
-        $json_array ++= [{
-            "post_title": $d.post_title, 
-            "published": $d.published,
-            "group_name": $d.group_name,
-            "website": $d.website,
-            "post_url": $d.post_url
-        }]
+# Safe field read from record
+def rware-field [entry: record, field: string] {
+    if ($entry | columns | any { |column| $column == $field }) {
+        (try { $entry | get $field | into string | str trim } catch { "" })
+    } else {
+        ""
     }
-    $json_array
+}
+
+# Return first non-empty value
+def rware-first-nonempty [values: list<any>] {
+    (try {
+        $values
+        | each { |v| $v | into string | str trim }
+        | where { |v| $v != "" }
+        | first
+    } catch {
+        ""
+    })
+}
+
+# Build stable identifier for ransomware entries
+def rware-entry-id [entry: record] {
+    let url_id = (rware-first-nonempty [
+        (rware-field $entry "url")
+        (rware-field $entry "post_url")
+        (rware-field $entry "claim_url")
+    ])
+
+    if $url_id != "" {
+        $url_id
+    } else {
+        let victim = (rware-first-nonempty [(rware-field $entry "victim"), (rware-field $entry "post_title")])
+        let group = (rware-first-nonempty [(rware-field $entry "group"), (rware-field $entry "group_name")])
+        let published = (rware-first-nonempty [(rware-field $entry "attackdate"), (rware-field $entry "published"), (rware-field $entry "discovered")])
+        $"($victim)|($group)|($published)"
+    }
+}
+
+# Parse entry timestamp to datetime (best effort)
+def rware-entry-datetime [entry: record] {
+    let raw_value = (rware-first-nonempty [
+        (rware-field $entry "discovered")
+        (rware-field $entry "published")
+        (rware-field $entry "attackdate")
+    ])
+
+    if $raw_value == "" {
+        null
+    } else {
+        (try { $raw_value | into datetime } catch { null })
+    }
+}
+
+# Fetch and shape ransomware feed
+def rware-fetch [country_code?: string] {
+    if ($country_code != null and (($country_code | str trim) != "")) {
+        let code = ($country_code | str trim | str upcase)
+        let data = (http get $"https://api.ransomware.live/v2/countryvictims/($code)" | to json | from json)
+        $data | each { |d|
+            {
+                post_title: $d.post_title
+                published: $d.published
+                group_name: $d.group_name
+                website: $d.website
+                post_url: $d.post_url
+                country: (try { $d.country } catch { "" })
+                discovered: (try { $d.discovered } catch { "" })
+            }
+        }
+    } else {
+        let data = (http get "https://api.ransomware.live/v2/recentvictims" | to json | from json)
+        $data | each { |d|
+            {
+                victim: $d.victim
+                attackdate: $d.attackdate
+                group: $d.group
+                domain: $d.domain
+                country: $d.country
+                url: $d.url
+                claim_url: $d.claim_url
+                discovered: (try { $d.discovered } catch { "" })
+            }
+        }
+    }
+}
+
+# Fetch ransomware victims (country or global) with optional monitoring mode
+def rware [
+    country_code?: string   # Optional ISO country code (TR, US). If empty, uses global recent feed.
+    --limit: int = 0        # Limit output rows (0 = unlimited)
+    --monitor (-m)          # Poll feed continuously and print only new entries
+    --interval: int = 30    # Monitor poll interval in seconds
+    --max-cycles: int = 0   # Monitor loop count (0 = infinite)
+] {
+    if $interval < 5 {
+        error make { msg: "--interval must be at least 5 seconds" }
+    }
+
+    if $monitor {
+        let monitor_started_at = (date now)
+        let initial = (rware-fetch $country_code)
+        let initial_total = ($initial | length)
+        let first_batch = if $limit > 0 { $initial | first $limit } else { $initial }
+        print $"(ansi cyan_bold)[rware](ansi reset) Monitoring started. Baseline entries: ($initial_total). Interval: ($interval)s"
+        if (($first_batch | length) > 0) {
+            print ($first_batch | table -e)
+        }
+
+        mut seen_ids = ($initial | each { |entry| rware-entry-id $entry } | uniq)
+        mut cycle = 0
+
+        loop {
+            if ($max_cycles > 0 and $cycle >= $max_cycles) {
+                break
+            }
+
+            sleep ($interval * 1sec)
+            let latest = (rware-fetch $country_code)
+            let new_entries = ($latest | where { |entry|
+                let entry_id = (rware-entry-id $entry)
+                let entry_time = (rware-entry-datetime $entry)
+                let is_recent = if $entry_time == null { true } else { $entry_time >= $monitor_started_at }
+                $is_recent and (($seen_ids | any { |id| $id == $entry_id }) == false)
+            })
+
+            if (($new_entries | length) > 0) {
+                let now = (date now | format date "%Y-%m-%d %H:%M:%S")
+                print $"(ansi green_bold)[rware](ansi reset) New entries detected at ($now): ($new_entries | length)"
+                let out = if $limit > 0 { $new_entries | first $limit } else { $new_entries }
+                print ($out | table -e)
+            }
+
+            let latest_ids = ($latest | each { |entry| rware-entry-id $entry })
+            $seen_ids = (($seen_ids | append $latest_ids | uniq | last 5000))
+            $cycle = ($cycle + 1)
+        }
+    } else {
+        let data = (rware-fetch $country_code)
+        if $limit > 0 { $data | first $limit } else { $data }
+    }
 }
 
 # Fetch latest proxy list
