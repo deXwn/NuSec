@@ -1941,7 +1941,11 @@ def triage [
             | str replace --all '&#160;' ' '
             | str replace --all '&nbsp;' ' '
             | str replace --all '&quot;' '"'
+            | str replace --all '&#34;' '"'
             | str replace --all '&#39;' "'"
+            | str replace --all '&#43;' '+'
+            | str replace --all '&lt;' '<'
+            | str replace --all '&gt;' '>'
             | str replace --all '&#10;' ' '
             | str replace --all '&#13;' ' '
             | str trim)
@@ -2048,7 +2052,8 @@ def triage [
             version: "-"
             botnet: "-"
             c2: []
-            urls: []
+            URLs: []
+            Deobfuscated: []
             credentials: []
             mutex: "-"
         }
@@ -2085,7 +2090,82 @@ def triage [
 
         let url_entries = (try {
             let urls_block = (do $config_block $config_section "URLs")
-            $urls_block | parse --regex '(?i)https?://[^<" ]+' | get capture0
+            let labeled_urls = (try {
+                $urls_block
+                | parse --regex '(?s)<b>([^<]+)</b>\s*<p>(https?://[^<" ]+)</p>'
+                | each { |row|
+                    let source = (do $clean_html_text $row.capture0)
+                    let url = (do $clean_html_text $row.capture1)
+                    if ($source != "" and $url != "") { $"($source): ($url)" } else { null }
+                }
+                | where { |v| $v != null }
+            } catch {
+                []
+            })
+            let clipboard_urls = (try {
+                $urls_block
+                | parse --regex '(?s)data-clipboard="([^"]+)"'
+                | get capture0
+                | each { |item|
+                    $item
+                    | str replace --all '&#10;' "\n"
+                    | str replace --all '&amp;' '&'
+                    | split row "\n"
+                }
+                | flatten
+                | each { |entry| $entry | str trim }
+                | where { |entry| ($entry | str downcase | str starts-with "http") }
+            } catch {
+                []
+            })
+            if (($labeled_urls | length) > 0) {
+                $labeled_urls
+            } else {
+                $clipboard_urls
+            }
+        } catch {
+            []
+        })
+
+        let deobfuscated_entries = (try {
+            let deobfuscated_block = (do $config_block $config_section "Deobfuscated")
+            let code_content_rows = (try {
+                $deobfuscated_block
+                | parse --regex '(?s)data-code-content="(.*?)"\s+data-code'
+                | get capture0
+            } catch {
+                []
+            })
+            let line_content_rows = (try {
+                $deobfuscated_block
+                | parse --regex '(?s)code-block__line__content[^>]*>(.*?)</div>'
+                | get capture0
+            } catch {
+                []
+            })
+            let pre_rows = (try {
+                $deobfuscated_block
+                | parse --regex '(?s)<pre[^>]*>(.*?)</pre>'
+                | get capture0
+            } catch {
+                []
+            })
+            let code_rows = (try {
+                $deobfuscated_block
+                | parse --regex '(?s)<code[^>]*>(.*?)</code>'
+                | get capture0
+            } catch {
+                []
+            })
+            let paragraph_rows = (try {
+                $deobfuscated_block
+                | parse --regex '(?s)<p[^>]*>(.*?)</p>'
+                | get capture0
+            } catch {
+                []
+            })
+
+            $code_content_rows | append $line_content_rows | append $pre_rows | append $code_rows | append $paragraph_rows
         } catch {
             []
         })
@@ -2105,7 +2185,29 @@ def triage [
         })
 
         let cleaned_c2 = (do $clean_list $c2_entries 4)
-        let cleaned_urls = (do $clean_list $url_entries 3)
+        let cleaned_urls = ($url_entries
+            | each { |entry| do $clean_html_text ($entry | into string) }
+            | each { |entry| $entry | str replace --all '&#10;' ' ' | str replace --all --regex '\s+' ' ' | str trim }
+            | where { |value| $value != "" }
+            | uniq
+            | first 8)
+        let cleaned_deobfuscated = ($deobfuscated_entries
+            | each { |entry|
+                let text = (($entry | into string)
+                    | str replace --all '\\/' '/'
+                    | str replace --all '&amp;' '&'
+                    | str replace --all '&quot;' '"'
+                    | str replace --all '&#34;' '"'
+                    | str replace --all '&#39;' "'"
+                    | str replace --all '&#43;' '+'
+                    | str replace --all '&#10;' "\n"
+                    | str replace --all '&#13;' "\n"
+                    | str replace --all --regex '<[^>]+>' ''
+                    | str trim)
+                $text
+            }
+            | where { |value| ($value | str trim) != "" }
+            | uniq)
         let cleaned_credentials = (do $clean_list $credential_entries 8)
 
         {
@@ -2113,7 +2215,8 @@ def triage [
             version: (if $version != "" { $version } else { "-" })
             botnet: (if $botnet != "" { $botnet } else { "-" })
             c2: $cleaned_c2
-            urls: $cleaned_urls
+            URLs: $cleaned_urls
+            Deobfuscated: $cleaned_deobfuscated
             credentials: $cleaned_credentials
             mutex: (if $mutex != "" { $mutex } else { "-" })
         }

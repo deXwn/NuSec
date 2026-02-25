@@ -67,7 +67,7 @@ windows-evt-hunt --log Security --event-id 4625 --since-hours 24 # Windows event
 
 `triage` C2 output is heuristic and focuses on likely payload/C2 hosts from behavioral requests.
 When available, domains are shown together with IP as `domain [ip]`.
-`MalwareConfig` is now a structured record (`family/version/botnet/c2/urls/credentials/mutex`) for cleaner table output.
+`MalwareConfig` is now a structured record (`family/version/botnet/c2/URLs/Deobfuscated/credentials/mutex`) for cleaner table output.
 `haus` supports `--limit`, `--host-only`, `--contains`, `--host-contains`, `--host-ends-with`, `--https-only`, and `--raw`.
 `rware` supports `--monitor`, `--interval`, `--limit`, and `--max-cycles` (test/debug loop count).
 `windows-evt-hunt` is Windows-only and uses PowerShell `Get-WinEvent`.
