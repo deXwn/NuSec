@@ -397,7 +397,7 @@ def hlp [command?: string, --verbose (-v)] {
         "windows-evt-hunt": "windows-evt-hunt --log Security --event-id 4625 --since-hours 24"
         "persist-hunt": "persist-hunt --contains cron --limit 50"
         "proc-hunt": "proc-hunt --min-score 2 --limit 50"
-        "proc-dump": "proc-dump --parse ollama.exe_20260225_003106.dmp"
+        "proc-dump": "proc-dump --parse ollama.exe_20260225_003106.dmp --parse-fields [ips]"
         "log-hunt": "log-hunt \"failed password\" --since-hours 24 --limit 100"
         "timeline-lite": "timeline-lite /var/tmp --with-hash --limit 100"
         upc: "upc"
@@ -440,9 +440,11 @@ def hlp [command?: string, --verbose (-v)] {
         ]
         "proc-dump": [
             "proc-dump --parse ollama.exe_20260225_003106.dmp"
+            "proc-dump --parse ollama.exe_20260225_003106.dmp --parse-fields [urls domains ips]"
+            "proc-dump --parse ollama.exe_20260225_003106.dmp --parse-fields [hashes]"
             "proc-dump lsass --out-dir C:\\dumps"
             "proc-dump ollama.exe --out-dir C:\\dumps --mini"
-            "proc-dump ollama.exe --out-dir C:\\dumps --parse --parse-limit 30"
+            "proc-dump ollama.exe --out-dir C:\\dumps --parse --parse-limit 30 --parse-fields [iocs]"
         ]
     }
 
@@ -887,6 +889,7 @@ def proc-hunt [
 def parse-dmp-critical [
     dump_path: string         # Target .dmp file
     --limit: int = 50         # Max findings per category
+    --fields: list<string>    # Optional subset: urls/domains/emails/ips/paths/credential_hits/md5/sha1/sha256, aliases: hashes|iocs|all
 ] {
     if (($dump_path | path exists) == false) {
         error make { msg: $"Dump file not found: ($dump_path)" }
@@ -895,6 +898,63 @@ def parse-dmp-critical [
     if $limit < 1 {
         error make { msg: "--limit must be >= 1." }
     }
+
+    let all_fields = [
+        "urls"
+        "domains"
+        "emails"
+        "ips"
+        "paths"
+        "credential_hits"
+        "md5"
+        "sha1"
+        "sha256"
+    ]
+    let alias_fields = ["hashes" "ioc" "iocs" "all"]
+    let normalized_fields = if $fields == null {
+        $all_fields
+    } else {
+        let base = ($fields
+            | each { |f| $f | str downcase | str trim }
+            | where { |f| $f != "" })
+        if (($base | length) == 0) {
+            $all_fields
+        } else if ($base | any { |f| $f == "all" }) {
+            $all_fields
+        } else {
+            mut expanded = []
+            for item in $base {
+                if $item == "hashes" {
+                    $expanded ++= ["md5" "sha1" "sha256"]
+                } else if ($item == "ioc" or $item == "iocs") {
+                    $expanded ++= ["urls" "domains" "emails" "ips"]
+                } else {
+                    $expanded ++= [$item]
+                }
+            }
+            ($expanded | uniq)
+        }
+    }
+
+    let invalid_fields = ($normalized_fields | where { |f| ($all_fields | any { |ok| $ok == $f }) == false })
+    if (($invalid_fields | length) > 0) {
+        let invalid_text = ($invalid_fields | str join ", ")
+        let allowed_text = (($all_fields | append $alias_fields | uniq) | str join ", ")
+        error make { msg: $"Invalid --fields values: ($invalid_text). Allowed: ($allowed_text)" }
+    }
+
+    let want_urls = ($normalized_fields | any { |f| $f == "urls" })
+    let want_domains = ($normalized_fields | any { |f| $f == "domains" })
+    let want_emails = ($normalized_fields | any { |f| $f == "emails" })
+    let want_ips = ($normalized_fields | any { |f| $f == "ips" })
+    let want_paths = ($normalized_fields | any { |f| $f == "paths" })
+    let want_credential_hits = ($normalized_fields | any { |f| $f == "credential_hits" })
+    let want_md5 = ($normalized_fields | any { |f| $f == "md5" })
+    let want_sha1 = ($normalized_fields | any { |f| $f == "sha1" })
+    let want_sha256 = ($normalized_fields | any { |f| $f == "sha256" })
+    let need_urls = ($want_urls or $want_domains)
+    let need_emails = ($want_emails or $want_domains)
+    let want_hashes = ($want_md5 or $want_sha1 or $want_sha256)
 
     let has_cmd = { |command: string|
         (try {
@@ -916,26 +976,123 @@ def parse-dmp-critical [
         }
     }
 
-    let is_public_ipv4 = { |candidate: string|
-        let ip = ($candidate | str trim)
-        if (
-            ($ip | str starts-with "10.")
-            or ($ip | str starts-with "127.")
-            or ($ip | str starts-with "192.168.")
-            or ($ip | str starts-with "169.254.")
-            or ($ip | str starts-with "0.")
-        ) {
+    let likely_gtlds = [
+        "com" "net" "org" "edu" "gov" "mil" "int" "biz" "info" "name"
+        "io" "co" "me" "app" "dev" "xyz" "online" "site" "cloud" "shop"
+        "store" "live" "ai" "tech" "top" "cc" "tv" "pro" "link" "digital"
+        "agency" "systems" "security" "tools" "club" "today" "world"
+    ]
+    let blocked_tlds = [
+        "dll" "pdb" "exe" "sys" "drv" "ocx" "scr" "cpl" "mui" "mun" "cat"
+        "manifest" "config" "cfg" "ini" "json" "xml" "yaml" "yml" "txt"
+        "log" "tmp" "bak" "dat" "bin" "ps1" "vbs" "js" "jar" "class"
+    ]
+    let domain_regex = '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+
+    let normalize_url = { |raw: string|
+        mut value = ($raw | str trim)
+        $value = ($value | str replace --all --regex "^[\\[\\(<\"']+" "")
+        $value = ($value | str replace --all --regex "[\\]\\)>\"'.,;]+$" "")
+        $value = ($value | str replace --all --regex '(?i)(\.(?:crl|crt|cer|htm|html|xml|json|txt|js|css|png|jpg|jpeg|gif|ico|pdf|zip|cab|msi|exe|dll))(?:[0-9a-z]{1,3})$' '$1')
+        $value
+    }
+
+    let url_host = { |candidate: string|
+        (try {
+            $candidate
+            | parse --regex '(?i)^https?://([^/:?#]+)'
+            | get 0.capture0
+            | str downcase
+            | str trim
+        } catch { "" })
+    }
+
+    let is_probable_tld = { |tld: string|
+        (($tld | str length) == 2) or ($likely_gtlds | any { |g| $g == $tld })
+    }
+
+    let is_valid_domain = { |candidate: string|
+        let domain = ($candidate | str trim | str downcase)
+        if (($domain | str contains "..") or ($domain | str starts-with ".") or ($domain | str ends-with ".")) {
             false
-        } else if (($ip | str starts-with "172.") and (try {
-            let second_octet = ($ip | split row "." | get 1 | into int)
-            $second_octet >= 16 and $second_octet <= 31
-        } catch {
-            false
-        })) {
+        } else if (($domain | parse --regex $domain_regex | length) == 0) {
             false
         } else {
-            true
+            let tld = ($domain | split row "." | last)
+            if (($blocked_tlds | any { |b| $b == $tld }) or ((do $is_probable_tld $tld) == false)) {
+                false
+            } else {
+                true
+            }
         }
+    }
+
+    let is_public_ipv4 = { |candidate: string|
+        let parts = ($candidate | str trim | split row ".")
+        if (($parts | length) != 4) {
+            false
+        } else {
+            let octets = (try {
+                $parts | each { |part|
+                    if (($part | parse --regex '^\d{1,3}$' | length) == 0) {
+                        error make { msg: "invalid-ip" }
+                    }
+                    if (($part | str length) > 1 and ($part | str starts-with "0")) {
+                        error make { msg: "invalid-ip-leading-zero" }
+                    }
+                    let value = ($part | into int)
+                    if ($value < 0 or $value > 255) {
+                        error make { msg: "invalid-ip-range" }
+                    }
+                    $value
+                }
+            } catch { [] })
+
+            if (($octets | length) != 4) {
+                false
+            } else {
+                let a = ($octets | get 0)
+                let b = ($octets | get 1)
+                let c = ($octets | get 2)
+                let d = ($octets | get 3)
+                if (
+                    ($d == 0)
+                    or ($a == 0)
+                    or ($a == 10)
+                    or ($a == 127)
+                    or ($a >= 224)
+                    or ($a == 169 and $b == 254)
+                    or ($a == 172 and $b >= 16 and $b <= 31)
+                    or ($a == 192 and $b == 168)
+                    or ($a == 100 and $b >= 64 and $b <= 127)
+                    or ($a == 198 and ($b == 18 or $b == 19))
+                    or ($a == 192 and $b == 0 and $c == 2)
+                    or ($a == 198 and $b == 51 and $c == 100)
+                    or ($a == 203 and $b == 0 and $c == 113)
+                ) {
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    let ip_context_noise_markers = [
+        "version="
+        "publickeytoken="
+        "processorarchitecture="
+        "winsxs\\manifests"
+        ".manifest"
+        "microsoft.windows."
+    ]
+    let is_ip_context_noise = { |line: string|
+        let lc = ($line | str downcase)
+        ($ip_context_noise_markers | any { |m| $lc | str contains $m })
+    }
+
+    let is_likely_hash = { |value: string|
+        (($value | split chars | uniq | length) >= 6)
     }
 
     let install_dir = ([$env.HOME ".nusecurity" "tools" "strings"] | path join)
@@ -1004,126 +1161,198 @@ def parse-dmp-critical [
         | each { |line| $line | str trim }
         | where { |line| $line != "" })
 
-    let urls = (try {
-        $lines
-        | parse --regex '(?i)(https?://[^\s"''<>]+)'
-        | get capture0
-        | uniq
-        | first $limit
-    } catch { [] })
+    let raw_urls = if $need_urls {
+        (try {
+            $lines
+            | parse --regex '(?i)(https?://[^\s"''<>]+)'
+            | get capture0
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let domains = (try {
-        $lines
-        | parse --regex '(?i)\b((?:[a-z0-9-]+\.)+[a-z]{2,63})\b'
-        | get capture0
-        | each { |d| $d | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let urls = if $need_urls {
+        (try {
+            $raw_urls
+            | each { |entry| do $normalize_url $entry }
+            | where { |url|
+                let host = (do $url_host $url)
+                $host != "" and ((do $is_public_ipv4 $host) or (do $is_valid_domain $host))
+            }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let emails = (try {
-        $lines
-        | parse --regex '(?i)\b([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,63})\b'
-        | get capture0
-        | each { |e| $e | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let emails = if $need_emails {
+        (try {
+            $lines
+            | parse --regex '(?i)\b([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,63})\b'
+            | get capture0
+            | each { |e| $e | str downcase }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let ips = (try {
-        $lines
-        | parse --regex '\b((?:\d{1,3}\.){3}\d{1,3})\b'
-        | get capture0
-        | where { |ip| do $is_public_ipv4 $ip }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let domains = if $want_domains {
+        (try {
+            let url_domains = ($urls
+                | each { |url| do $url_host $url }
+                | where { |host| $host != "" and (do $is_valid_domain $host) })
+            let email_domains = ($emails
+                | each { |email| $email | split row "@" | get 1 }
+                | where { |domain| do $is_valid_domain $domain })
+            let line_domains = ($lines
+                | parse --regex '(?i)\b((?:[a-z0-9-]+\.)+[a-z]{2,63})\b'
+                | get capture0
+                | each { |domain| $domain | str downcase }
+                | where { |domain| do $is_valid_domain $domain })
+            ($url_domains | append $email_domains | append $line_domains | uniq | first $limit)
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let paths = (try {
-        $lines
-        | parse --regex '(?i)([a-z]:\\[^:*?"<>|\r\n]{3,260})'
-        | get capture0
-        | uniq
-        | first $limit
-    } catch { [] })
+    let ips = if $want_ips {
+        (try {
+            $lines
+            | each { |line|
+                if (do $is_ip_context_noise $line) {
+                    []
+                } else {
+                    (try { $line | parse --regex '\b((?:\d{1,3}\.){3}\d{1,3})\b' | get capture0 } catch { [] })
+                }
+            }
+            | flatten
+            | where { |ip| do $is_public_ipv4 $ip }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let md5s = (try {
-        $lines
-        | parse --regex '\b([A-Fa-f0-9]{32})\b'
-        | get capture0
-        | each { |h| $h | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let paths = if $want_paths {
+        (try {
+            $lines
+            | parse --regex '(?i)([a-z]:\\[^:*?"<>|\r\n]{3,260})'
+            | get capture0
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let sha1s = (try {
-        $lines
-        | parse --regex '\b([A-Fa-f0-9]{40})\b'
-        | get capture0
-        | each { |h| $h | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let md5s = if $want_md5 {
+        (try {
+            $lines
+            | parse --regex '\b([A-Fa-f0-9]{32})\b'
+            | get capture0
+            | each { |h| $h | str downcase }
+            | where { |h| do $is_likely_hash $h }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let sha256s = (try {
-        $lines
-        | parse --regex '\b([A-Fa-f0-9]{64})\b'
-        | get capture0
-        | each { |h| $h | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let sha1s = if $want_sha1 {
+        (try {
+            $lines
+            | parse --regex '\b([A-Fa-f0-9]{40})\b'
+            | get capture0
+            | each { |h| $h | str downcase }
+            | where { |h| do $is_likely_hash $h }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    let keywords = [
-        "password"
-        "passwd"
-        "pwd"
-        "token"
-        "apikey"
-        "api_key"
-        "authorization"
-        "bearer"
-        "cookie"
-        "session"
-        "secret"
-        "credential"
+    let sha256s = if $want_sha256 {
+        (try {
+            $lines
+            | parse --regex '\b([A-Fa-f0-9]{64})\b'
+            | get capture0
+            | each { |h| $h | str downcase }
+            | where { |h| do $is_likely_hash $h }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
+
+    let credential_patterns = [
+        '(?i)\b(pass(word|wd)?|pwd|secret|api[_-]?key|client[_-]?secret|authorization|bearer|cookie|credential|username|user|access[_-]?token|refresh[_-]?token)\b\s*[:=]'
+        '(?i)\bauthorization\s+bearer\s+[a-z0-9._-]+'
+        '(?i)\bset-cookie\b'
     ]
-    let credential_hits = (try {
-        $lines
-        | where { |line|
-            let lc = ($line | str downcase)
-            ($keywords | any { |k| $lc | str contains $k })
-        }
-        | uniq
-        | first $limit
-    } catch { [] })
+    let credential_noise_markers = [
+        "api-ms-win-"
+        "ext-ms-win-"
+        "token_helpers.h"
+        "publickeytoken="
+        "processorarchitecture="
+        "winsxs\\manifests"
+    ]
+    let credential_hits = if $want_credential_hits {
+        (try {
+            $lines
+            | where { |line|
+                let lc = ($line | str downcase)
+                if ($credential_noise_markers | any { |m| $lc | str contains $m }) {
+                    false
+                } else {
+                    ($credential_patterns | any { |pattern| ($lc | parse --regex $pattern | length) > 0 })
+                }
+            }
+            | uniq
+            | first $limit
+        } catch { [] })
+    } else {
+        []
+    }
 
-    {
+    mut summary = {}
+    if $want_urls { $summary = ($summary | merge { urls: ($urls | length) }) }
+    if $want_domains { $summary = ($summary | merge { domains: ($domains | length) }) }
+    if $want_emails { $summary = ($summary | merge { emails: ($emails | length) }) }
+    if $want_ips { $summary = ($summary | merge { ips: ($ips | length) }) }
+    if $want_paths { $summary = ($summary | merge { paths: ($paths | length) }) }
+    if $want_credential_hits { $summary = ($summary | merge { credential_hits: ($credential_hits | length) }) }
+    if $want_md5 { $summary = ($summary | merge { md5: ($md5s | length) }) }
+    if $want_sha1 { $summary = ($summary | merge { sha1: ($sha1s | length) }) }
+    if $want_sha256 { $summary = ($summary | merge { sha256: ($sha256s | length) }) }
+
+    mut out = {
         file: $dump_path
         max_per_category: $limit
-        summary: {
-            urls: ($urls | length)
-            domains: ($domains | length)
-            emails: ($emails | length)
-            ips: ($ips | length)
-            paths: ($paths | length)
-            credential_hits: ($credential_hits | length)
-            md5: ($md5s | length)
-            sha1: ($sha1s | length)
-            sha256: ($sha256s | length)
-        }
-        urls: $urls
-        domains: $domains
-        emails: $emails
-        ips: $ips
-        paths: $paths
-        credential_hits: $credential_hits
-        hashes: {
-            md5: $md5s
-            sha1: $sha1s
-            sha256: $sha256s
-        }
+        summary: $summary
     }
+    if $want_urls { $out = ($out | merge { urls: $urls }) }
+    if $want_domains { $out = ($out | merge { domains: $domains }) }
+    if $want_emails { $out = ($out | merge { emails: $emails }) }
+    if $want_ips { $out = ($out | merge { ips: $ips }) }
+    if $want_paths { $out = ($out | merge { paths: $paths }) }
+    if $want_credential_hits { $out = ($out | merge { credential_hits: $credential_hits }) }
+    if $want_hashes {
+        mut hashes = {}
+        if $want_md5 { $hashes = ($hashes | merge { md5: $md5s }) }
+        if $want_sha1 { $hashes = ($hashes | merge { sha1: $sha1s }) }
+        if $want_sha256 { $hashes = ($hashes | merge { sha256: $sha256s }) }
+        $out = ($out | merge { hashes: $hashes })
+    }
+
+    $out
 }
 
 # Dump a running process with Sysinternals ProcDump (Windows only)
@@ -1137,6 +1366,7 @@ def proc-dump [
     --name: string             # Optional dump filename (defaults to auto-generated)
     --parse (-p)               # Parse dump and extract critical artifacts
     --parse-limit: int = 50    # Max findings per artifact category
+    --parse-fields: list<string> # Optional parse subset: urls/domains/emails/ips/paths/credential_hits/md5/sha1/sha256, aliases: hashes|iocs|all
 ] {
     let is_windows = (($nu.os-info.name | str downcase) == "windows")
     if ($is_windows == false) {
@@ -1159,10 +1389,16 @@ def proc-dump [
             error make { msg: $"Dump file not found for parse mode: ($normalized_target)" }
         }
 
+        let parsed_data = if $parse_fields == null {
+            (parse-dmp-critical $normalized_target --limit $parse_limit)
+        } else {
+            (parse-dmp-critical $normalized_target --limit $parse_limit --fields $parse_fields)
+        }
+
         return {
             mode: "parse-only"
             input: $normalized_target
-            parsed: (parse-dmp-critical $normalized_target --limit $parse_limit)
+            parsed: $parsed_data
         }
     }
 
@@ -1269,8 +1505,13 @@ def proc-dump [
     }
 
     if $parse {
+        let parsed_data = if $parse_fields == null {
+            (parse-dmp-critical $dump_path --limit $parse_limit)
+        } else {
+            (parse-dmp-critical $dump_path --limit $parse_limit --fields $parse_fields)
+        }
         $out = ($out | merge {
-            parsed: (parse-dmp-critical $dump_path --limit $parse_limit)
+            parsed: $parsed_data
         })
     }
 
