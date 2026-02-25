@@ -352,7 +352,7 @@ def hlp [command?: string, --verbose (-v)] {
         "windows-evt-hunt": "Hunt Windows Event Log entries quickly."
         "persist-hunt": "Hunt persistence artifacts on host."
         "proc-hunt": "Score suspicious running processes."
-        "proc-dump": "Dump a process or parse an existing .dmp file."
+        "proc-dump": "Dump a running process with ProcDump."
         "log-hunt": "Hunt suspicious auth/system log lines."
         "timeline-lite": "Build quick file timeline for a path."
         upc: "Pull latest config from GitHub."
@@ -397,7 +397,7 @@ def hlp [command?: string, --verbose (-v)] {
         "windows-evt-hunt": "windows-evt-hunt --log Security --event-id 4625 --since-hours 24"
         "persist-hunt": "persist-hunt --contains cron --limit 50"
         "proc-hunt": "proc-hunt --min-score 2 --limit 50"
-        "proc-dump": "proc-dump --parse ollama.exe_20260225_003106.dmp"
+        "proc-dump": "proc-dump lsass --out-dir C:\\dumps"
         "log-hunt": "log-hunt \"failed password\" --since-hours 24 --limit 100"
         "timeline-lite": "timeline-lite /var/tmp --with-hash --limit 100"
         upc: "upc"
@@ -439,10 +439,9 @@ def hlp [command?: string, --verbose (-v)] {
             "rware tr --monitor --interval 30 --max-cycles 20"
         ]
         "proc-dump": [
-            "proc-dump --parse ollama.exe_20260225_003106.dmp"
             "proc-dump lsass --out-dir C:\\dumps"
             "proc-dump ollama.exe --out-dir C:\\dumps --mini"
-            "proc-dump ollama.exe --out-dir C:\\dumps --parse --parse-limit 30"
+            "proc-dump notepad.exe --out-dir C:\\dumps --full"
         ]
     }
 
@@ -884,248 +883,6 @@ def proc-hunt [
     if $limit > 0 { $scored | first $limit } else { $scored }
 }
 
-def parse-dmp-critical [
-    dump_path: string         # Target .dmp file
-    --limit: int = 50         # Max findings per category
-] {
-    if (($dump_path | path exists) == false) {
-        error make { msg: $"Dump file not found: ($dump_path)" }
-    }
-
-    if $limit < 1 {
-        error make { msg: "--limit must be >= 1." }
-    }
-
-    let has_cmd = { |command: string|
-        (try {
-            let command_paths = (which --all $command | where type == "external" | get path)
-            (($command_paths | where { |candidate| ($candidate | str trim) != "" and ($candidate | path exists) } | length) > 0)
-        } catch {
-            false
-        })
-    }
-
-    let to_text = { |value: any|
-        let d = ($value | describe)
-        if ($d | str starts-with "binary") {
-            (try { $value | decode utf-8 } catch { (try { $value | decode cp1254 } catch { "" }) })
-        } else if (($d | str starts-with "list") or ($d | str starts-with "table")) {
-            ($value | each { |line| $line | into string } | str join "\n")
-        } else {
-            (try { $value | into string } catch { "" })
-        }
-    }
-
-    let is_public_ipv4 = { |candidate: string|
-        let ip = ($candidate | str trim)
-        if (
-            ($ip | str starts-with "10.")
-            or ($ip | str starts-with "127.")
-            or ($ip | str starts-with "192.168.")
-            or ($ip | str starts-with "169.254.")
-            or ($ip | str starts-with "0.")
-        ) {
-            false
-        } else if (($ip | str starts-with "172.") and (try {
-            let second_octet = ($ip | split row "." | get 1 | into int)
-            $second_octet >= 16 and $second_octet <= 31
-        } catch {
-            false
-        })) {
-            false
-        } else {
-            true
-        }
-    }
-
-    let install_dir = ([$env.HOME ".nusecurity" "tools" "strings"] | path join)
-    let local64 = ([$install_dir "strings64.exe"] | path join)
-    let local32 = ([$install_dir "strings.exe"] | path join)
-
-    mut strings_cmd = ""
-    mut sysinternals_mode = false
-    if (do $has_cmd "strings64.exe") {
-        $strings_cmd = "strings64.exe"
-        $sysinternals_mode = true
-    } else if (do $has_cmd "strings.exe") {
-        $strings_cmd = "strings.exe"
-        $sysinternals_mode = true
-    } else if ($local64 | path exists) {
-        $strings_cmd = ($local64 | into string)
-        $sysinternals_mode = true
-    } else if ($local32 | path exists) {
-        $strings_cmd = ($local32 | into string)
-        $sysinternals_mode = true
-    } else if (do $has_cmd "strings64") {
-        $strings_cmd = "strings64"
-    } else if (do $has_cmd "strings") {
-        $strings_cmd = "strings"
-    }
-
-    if $strings_cmd == "" {
-        let install_dir_text = ($install_dir | into string)
-        let safe_install_dir = ($install_dir_text | str replace --all "'" "''")
-        print $"(ansi cyan_bold)[parse](ansi reset) strings not found. Downloading to: (ansi green_bold)($install_dir_text)(ansi reset)"
-        let bootstrap_lines = [
-            "$ErrorActionPreference = 'Stop'"
-            ("$installDir = '" + $safe_install_dir + "'")
-            "$zipPath = Join-Path $installDir 'Strings.zip'"
-            "$url = 'https://download.sysinternals.com/files/Strings.zip'"
-            "New-Item -ItemType Directory -Path $installDir -Force | Out-Null"
-            "Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zipPath"
-            "Expand-Archive -Path $zipPath -DestinationPath $installDir -Force"
-            "Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue"
-        ]
-        try {
-            powershell-text ($bootstrap_lines | str join "; ") | ignore
-        } catch {
-            error make { msg: "Auto-install failed. Install Sysinternals Strings manually or add strings to PATH." }
-        }
-        if ($local64 | path exists) {
-            $strings_cmd = ($local64 | into string)
-            $sysinternals_mode = true
-        } else if ($local32 | path exists) {
-            $strings_cmd = ($local32 | into string)
-            $sysinternals_mode = true
-        } else {
-            error make { msg: "strings download completed but executable not found." }
-        }
-    }
-
-    let combined = if $sysinternals_mode {
-        (do $to_text (try { run-external $strings_cmd "-accepteula" "-nobanner" "-n" "6" $dump_path } catch { "" }))
-    } else {
-        let ascii_raw = (try { run-external $strings_cmd "-n" "6" $dump_path } catch { "" })
-        let unicode_raw = (try { run-external $strings_cmd "-el" "-n" "6" $dump_path } catch { "" })
-        ((do $to_text $ascii_raw) + "\n" + (do $to_text $unicode_raw))
-    }
-    let lines = ($combined
-        | lines
-        | each { |line| $line | str trim }
-        | where { |line| $line != "" })
-
-    let urls = (try {
-        $lines
-        | parse --regex '(?i)(https?://[^\s"''<>]+)'
-        | get capture0
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let domains = (try {
-        $lines
-        | parse --regex '(?i)\b((?:[a-z0-9-]+\.)+[a-z]{2,63})\b'
-        | get capture0
-        | each { |d| $d | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let emails = (try {
-        $lines
-        | parse --regex '(?i)\b([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,63})\b'
-        | get capture0
-        | each { |e| $e | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let ips = (try {
-        $lines
-        | parse --regex '\b((?:\d{1,3}\.){3}\d{1,3})\b'
-        | get capture0
-        | where { |ip| do $is_public_ipv4 $ip }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let paths = (try {
-        $lines
-        | parse --regex '(?i)([a-z]:\\[^:*?"<>|\r\n]{3,260})'
-        | get capture0
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let md5s = (try {
-        $lines
-        | parse --regex '\b([A-Fa-f0-9]{32})\b'
-        | get capture0
-        | each { |h| $h | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let sha1s = (try {
-        $lines
-        | parse --regex '\b([A-Fa-f0-9]{40})\b'
-        | get capture0
-        | each { |h| $h | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let sha256s = (try {
-        $lines
-        | parse --regex '\b([A-Fa-f0-9]{64})\b'
-        | get capture0
-        | each { |h| $h | str downcase }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    let keywords = [
-        "password"
-        "passwd"
-        "pwd"
-        "token"
-        "apikey"
-        "api_key"
-        "authorization"
-        "bearer"
-        "cookie"
-        "session"
-        "secret"
-        "credential"
-    ]
-    let credential_hits = (try {
-        $lines
-        | where { |line|
-            let lc = ($line | str downcase)
-            ($keywords | any { |k| $lc | str contains $k })
-        }
-        | uniq
-        | first $limit
-    } catch { [] })
-
-    {
-        file: $dump_path
-        max_per_category: $limit
-        summary: {
-            urls: ($urls | length)
-            domains: ($domains | length)
-            emails: ($emails | length)
-            ips: ($ips | length)
-            paths: ($paths | length)
-            credential_hits: ($credential_hits | length)
-            md5: ($md5s | length)
-            sha1: ($sha1s | length)
-            sha256: ($sha256s | length)
-        }
-        urls: $urls
-        domains: $domains
-        emails: $emails
-        ips: $ips
-        paths: $paths
-        credential_hits: $credential_hits
-        hashes: {
-            md5: $md5s
-            sha1: $sha1s
-            sha256: $sha256s
-        }
-    }
-}
-
 # Dump a running process with Sysinternals ProcDump (Windows only)
 def proc-dump [
     target: string             # Process name (e.g. lsass) or PID
@@ -1135,8 +892,6 @@ def proc-dump [
     --wait (-w)                # Wait for process if not running yet
     --count (-n): int = 1      # Number of dumps to capture
     --name: string             # Optional dump filename (defaults to auto-generated)
-    --parse (-p)               # Parse dump and extract critical artifacts
-    --parse-limit: int = 50    # Max findings per artifact category
 ] {
     let is_windows = (($nu.os-info.name | str downcase) == "windows")
     if ($is_windows == false) {
@@ -1147,24 +902,7 @@ def proc-dump [
         error make { msg: "target cannot be empty." }
     }
 
-    if ($parse_limit < 1) {
-        error make { msg: "--parse-limit must be >= 1." }
-    }
-
     let normalized_target = ($target | str trim)
-    let is_dump_target = (($normalized_target | str downcase) | str ends-with ".dmp")
-
-    if ($parse and $is_dump_target) {
-        if (($normalized_target | path exists) == false) {
-            error make { msg: $"Dump file not found for parse mode: ($normalized_target)" }
-        }
-
-        return {
-            mode: "parse-only"
-            input: $normalized_target
-            parsed: (parse-dmp-critical $normalized_target --limit $parse_limit)
-        }
-    }
 
     let has_cmd = { |command: string|
         (try {
@@ -1260,23 +998,14 @@ def proc-dump [
 
     run-external $procdump_cmd ...$args
 
-    mut out = {
+    {
         tool: $procdump_cmd
         target: $normalized_target
         mode: (if $mini { "mini" } else { "full" })
         output: $dump_path
         count: $count
     }
-
-    if $parse {
-        $out = ($out | merge {
-            parsed: (parse-dmp-critical $dump_path --limit $parse_limit)
-        })
-    }
-
-    $out
 }
-
 # Hunt suspicious log lines quickly
 def log-hunt [
     pattern?: string      # Optional keyword/regex-like text match (case-insensitive contains)
